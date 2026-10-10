@@ -1,0 +1,18 @@
+# Build output
+/target
+
+# Local data: candump recordings (GBs) and the TeR database repo (its own git repo)
+/logs/
+/TeR_DATABASES/
+*.log
+
+# Exports and screenshots produced while using the app
+*.csv
+*.ppm
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

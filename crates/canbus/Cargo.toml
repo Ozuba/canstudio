@@ -1,0 +1,16 @@
+[package]
+name = "canbus"
+description = "CAN frames, candump IO, columnar frame store, statistics and SocketCAN"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dbc.workspace = true
+serde.workspace = true
+memmap2 = "0.9"
+rayon = "1.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan = { version = "4.0", default-features = false }
