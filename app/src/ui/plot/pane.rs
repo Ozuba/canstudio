@@ -321,7 +321,10 @@ impl Pane {
             {
                 ev.activate = true;
             }
+            let names: Vec<String> = self.traces.iter().map(|t| t.sig.clone()).collect();
             for (idx, t) in self.traces.iter_mut().enumerate() {
+                // Qualify with the message when two traces share a signal name.
+                let label = if names.iter().filter(|n| **n == t.sig).count() > 1 { format!("{}.{}", t.msg, t.sig) } else { t.sig.clone() };
                 let l = live.iter().find(|l| l.idx == idx);
                 let value = l.and_then(|l| {
                     let at = fc.cursors[0].unwrap_or(f64::INFINITY);
@@ -334,7 +337,7 @@ impl Pane {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             util::swatch(ui, if t.visible { t.color } else { t.color.gamma_multiply(0.25) });
-                            let mut text = RichText::new(&t.sig);
+                            let mut text = RichText::new(label);
                             if l.is_none() {
                                 text = text.strikethrough().weak();
                             } else if !t.visible {

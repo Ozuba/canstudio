@@ -3,6 +3,13 @@
 A self-contained CAN bus tool suite in Rust + egui: DBC editor, candump log
 viewer, signal plotting, live SocketCAN, bus diagnostics and transmit.
 
+![canstudio showing a 50 s drive cycle: vehicle state machine with value-table strips, HV precharge, pedals and motor speeds, plus the byte-level monitor](docs/screenshot.png)
+
+*A 50 s drive cycle from a candump log (200 k frames, loaded in 17 ms): the
+vehicle state machine with labelled value-table strips, the HV bus
+precharging, pedal inputs, both motor speeds, and the Monitor tab highlighting
+the bytes that just changed.*
+
 ```
 cargo run --release -p canstudio -- TeR_DATABASES/ALL.dbc logs/some.log \
     --plot TER_STATUS.STATE --plot InverterInfo.leftMotorTemp,InverterInfo.rightMotorTemp

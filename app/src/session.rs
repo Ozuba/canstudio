@@ -115,6 +115,8 @@ impl Session {
     }
 
     pub fn open_dbc(&mut self, path: &Path) {
+        // Canonical paths so the same file opened two ways is not loaded twice.
+        let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         match dbc::read_file(path) {
             Ok((dbc, errors)) => {
                 let msg = format!(
