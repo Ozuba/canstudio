@@ -8,6 +8,7 @@ mod widgets;
 use dbc::{AttrKind, AttrObject, AttributeDef, Dbc, Message, Node, ValueTable};
 use eframe::egui::{self, RichText};
 
+use super::order::{self, MessageOrder};
 use crate::session::Session;
 use crate::util;
 use widgets::commit_text;
@@ -60,7 +61,7 @@ impl DbcEditor {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, s: &mut Session) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, s: &mut Session, order: &mut MessageOrder) {
         if s.dbs.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
@@ -84,7 +85,7 @@ impl DbcEditor {
         self.shortcuts(ui, s);
         let mut changed = false;
         egui::Panel::left("dbc_sidebar").resizable(true).default_size(270.0).show(ui, |ui| {
-            changed |= self.sidebar(ui, s);
+            changed |= self.sidebar(ui, s, order);
         });
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -165,7 +166,7 @@ impl DbcEditor {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui, s: &mut Session) -> bool {
+    fn sidebar(&mut self, ui: &mut egui::Ui, s: &mut Session, order: &mut MessageOrder) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("dbc_pick").width(170.0).selected_text(s.dbs[self.db].name()).show_ui(ui, |ui| {
@@ -235,6 +236,7 @@ impl DbcEditor {
         ui.separator();
 
         util::search_box(ui, &mut self.search, "filter nodes / messages");
+        order.picker(ui, "editor");
         let filter = self.search.to_lowercase();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::CollapsingHeader::new(format!("🖧 Nodes ({})", dbc.nodes.len())).show(ui, |ui| {
@@ -258,11 +260,15 @@ impl DbcEditor {
                     changed = true;
                 }
             });
-            for (i, m) in dbc.messages.iter().enumerate() {
-                let id = format!("{:X}", m.raw_id());
-                if !util::matches(&filter, &[&m.name, &id]) {
-                    continue;
-                }
+            let shown: Vec<order::Entry> = dbc
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| util::matches(&filter, &[&m.name, &format!("{:X}", m.raw_id())]))
+                .map(|(index, m)| order::Entry { index, key: m.id, name: &m.name, node: &m.transmitter })
+                .collect();
+            order::show(ui, &order::arrange(*order, shown), "editor", |ui, i| {
+                let m = &dbc.messages[i];
                 let mut label = RichText::new(format!("{:>8}  {}", canbus::frame::fmt_key(m.id), m.name)).monospace();
                 if problem_msgs.contains(&i) {
                     label = label.color(ui.visuals().warn_fg_color);
@@ -270,7 +276,7 @@ impl DbcEditor {
                 if ui.selectable_label(self.page == Page::Message(i), label).clicked() {
                     self.select(Page::Message(i));
                 }
-            }
+            });
         });
         changed
     }

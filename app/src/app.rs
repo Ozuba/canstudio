@@ -11,6 +11,7 @@ use crate::session::Session;
 use crate::ui::Tab;
 use crate::ui::dbc_editor::DbcEditor;
 use crate::ui::diagnostics::Diagnostics;
+use crate::ui::order::MessageOrder;
 use crate::ui::plot::PlotWorkspace;
 use crate::ui::signal_tree::SignalTree;
 use crate::ui::trace::{MonitorView, TraceView};
@@ -63,6 +64,8 @@ struct Persisted {
     bitrate: canbus::Bitrate,
     show_tree: bool,
     dark: bool,
+    /// Display order of message lists (editor and signal tree).
+    message_order: MessageOrder,
 }
 
 impl Default for Persisted {
@@ -78,6 +81,7 @@ impl Default for Persisted {
             bitrate: Default::default(),
             show_tree: true,
             dark: true,
+            message_order: MessageOrder::default(),
         }
     }
 }
@@ -393,6 +397,7 @@ struct Tabs<'a> {
     diagnostics: &'a mut Diagnostics,
     transmit: &'a mut Transmit,
     editor: &'a mut DbcEditor,
+    message_order: &'a mut MessageOrder,
 }
 
 impl TabViewer for Tabs<'_> {
@@ -416,7 +421,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Monitor => self.monitor.ui(ui, self.session, self.plots),
             Tab::Diagnostics => self.diagnostics.ui(ui, self.session, self.plots),
             Tab::Transmit => self.transmit.ui(ui, self.session),
-            Tab::DbcEditor => self.editor.ui(ui, self.session),
+            Tab::DbcEditor => self.editor.ui(ui, self.session, self.message_order),
         }
     }
 
@@ -482,7 +487,7 @@ impl eframe::App for App {
         if self.p.show_tree {
             egui::Panel::left("tree").default_size(290.0).show(ui, |ui| {
                 ui.add_space(4.0);
-                self.tree.ui(ui, &mut self.session, &mut self.p.plots);
+                self.tree.ui(ui, &mut self.session, &mut self.p.plots, &mut self.p.message_order);
             });
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -494,6 +499,7 @@ impl eframe::App for App {
                 diagnostics: &mut self.p.diagnostics,
                 transmit: &mut self.p.transmit,
                 editor: &mut self.editor,
+                message_order: &mut self.p.message_order,
             };
             DockArea::new(&mut self.p.dock)
                 .style(Style::from_egui(ui.style()))

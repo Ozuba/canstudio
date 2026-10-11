@@ -2,6 +2,7 @@
 
 pub mod dbc_editor;
 pub mod diagnostics;
+pub mod order;
 pub mod plot;
 pub mod signal_tree;
 pub mod trace;
