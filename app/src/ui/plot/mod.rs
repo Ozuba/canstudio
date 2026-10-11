@@ -357,15 +357,15 @@ impl PlotWorkspace {
             ui.menu_button("💾 Export", |ui| {
                 let (lo, hi) = self.export_range(s);
                 ui.label(RichText::new(format!("Range: {} … {}", util::fmt_duration(lo), util::fmt_duration(hi))).weak());
-                if ui.button("Plotted signals → CSV (wide, sample & hold)").clicked() {
+                if ui.button("Plotted signals to CSV (wide, sample & hold)").clicked() {
                     export::csv(s, &self.panes, lo, hi, true);
                     ui.close();
                 }
-                if ui.button("Plotted signals → CSV (long, raw samples)").clicked() {
+                if ui.button("Plotted signals to CSV (long, raw samples)").clicked() {
                     export::csv(s, &self.panes, lo, hi, false);
                     ui.close();
                 }
-                if ui.button("Frames in range → candump log").clicked() {
+                if ui.button("Frames in range to candump log").clicked() {
                     s.save_range(lo, hi);
                     ui.close();
                 }

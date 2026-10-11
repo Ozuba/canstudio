@@ -89,9 +89,27 @@ pub fn page(ui: &mut egui::Ui, s: &Session, dbc: &mut Dbc, mi: usize, selected_s
         out.changed |= widgets::attributes(ui, ("msg", mi), &defs, AttrObject::Message, &mut dbc.messages[mi].attributes);
     });
 
-    egui::CollapsingHeader::new("▦ Bit layout").default_open(true).show(ui, |ui| {
-        if let Some(si) = widgets::bit_layout(ui, &dbc.messages[mi], selected_sig) {
-            out.select_signal = Some(Some(si));
+    egui::CollapsingHeader::new("Bit layout").default_open(true).show(ui, |ui| {
+        match widgets::bit_layout(ui, &dbc.messages[mi], selected_sig) {
+            Some(widgets::LayoutEvent::Select(si)) => out.select_signal = Some(Some(si)),
+            Some(widgets::LayoutEvent::Move { sig, start_bit }) => {
+                dbc.messages[mi].signals[sig].start_bit = start_bit;
+                out.select_signal = Some(Some(sig));
+                out.changed = true;
+            }
+            Some(widgets::LayoutEvent::Create { start_bit, size }) => {
+                let m = &mut dbc.messages[mi];
+                let mut name = format!("Signal_{}", m.signals.len() + 1);
+                while m.signals.iter().any(|s| s.name == name) {
+                    name.push('_');
+                }
+                let mut sig = Signal::new(name, start_bit);
+                sig.size = size;
+                m.signals.push(sig);
+                out.select_signal = Some(Some(m.signals.len() - 1));
+                out.changed = true;
+            }
+            None => {}
         }
     });
 

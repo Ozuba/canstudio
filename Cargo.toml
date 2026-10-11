@@ -15,6 +15,14 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4"
 
 [profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# `cargo build --profile profiling`: release speed with symbols for perf/flamegraphs.
+[profile.profiling]
+inherits = "release"
+strip = false
 debug = 1
 
 [profile.dev.package."*"]

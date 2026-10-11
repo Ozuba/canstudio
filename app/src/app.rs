@@ -113,7 +113,8 @@ impl App {
             monitor: Default::default(),
             editor: Default::default(),
             ifaces: (Vec::new(), None),
-            screenshot: std::env::var_os("CANSTUDIO_SCREENSHOT").map(|p| (p.into(), 0)),
+            // Development aid only; compiled out of the hook unless `--features dev-screenshot`.
+            screenshot: cfg!(feature = "dev-screenshot").then(|| std::env::var_os("CANSTUDIO_SCREENSHOT")).flatten().map(|p| (p.into(), 0)),
             p,
         };
         app.session.bitrate = app.p.bitrate;
@@ -259,11 +260,14 @@ impl App {
                 ui.label(RichText::new("Plots").strong());
                 ui.label("Drag: pan · Scroll / Ctrl+scroll: zoom · Right-drag: box zoom");
                 ui.label("Click: cursor A · Shift+click: cursor B · F: fit all");
-                ui.label("←/→: pan · +/−: zoom · Home/End: jump · Space: follow (live)");
+                ui.label("Left/Right: pan · +/-: zoom · Home/End: jump · Space: follow (live)");
                 ui.separator();
                 ui.label(RichText::new("Files").strong());
                 ui.label("Drop .dbc or candump logs anywhere on the window.");
                 ui.label("Ctrl+O: open log · Ctrl+D: open DBC · Ctrl+S / Ctrl+Z / Ctrl+Y in the DBC editor");
+                ui.separator();
+                ui.label(RichText::new(format!("canstudio {}", crate::VERSION)).weak());
+                ui.hyperlink_to("github.com/Ozuba/canstudio", "https://github.com/Ozuba/canstudio");
             });
         });
     }

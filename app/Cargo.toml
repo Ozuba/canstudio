@@ -18,3 +18,33 @@ egui_extras = "0.36"
 rfd = "0.17"
 chrono = "0.4"
 env_logger = "0.11"
+
+[features]
+# Development aid: CANSTUDIO_SCREENSHOT=out.ppm saves one frame and exits.
+dev-screenshot = []
+
+# Linux packages: `cargo packager --release -p canstudio` (see .github/workflows/release.yml).
+[package.metadata.packager]
+product-name = "canstudio"
+identifier = "io.github.ozuba.canstudio"
+description = "CAN bus workbench: DBC editor, log viewer, plotting, live SocketCAN, diagnostics"
+long-description = """
+canstudio is a self-contained CAN bus tool suite: a lossless DBC editor, a fast
+candump log viewer with signal plotting and value-table state strips, live
+SocketCAN capture with CAN-FD and error frames, bus diagnostics, transmit and
+recording."""
+homepage = "https://github.com/Ozuba/canstudio"
+authors = ["Ozuba"]
+category = "DeveloperTool"
+before-packaging-command = "cargo build --release -p canstudio"
+binaries-dir = "../target/release"
+out-dir = "../target/packages"
+binaries = [{ path = "canstudio", main = true }]
+icons = ["assets/icons/32x32.png", "assets/icons/64x64.png", "assets/icons/128x128.png", "assets/icons/256x256.png", "assets/icons/512x512.png"]
+formats = ["deb", "appimage"]
+file-associations = [{ extensions = ["dbc"], mime-type = "application/x-dbc", description = "CAN database" }]
+
+[package.metadata.packager.deb]
+section = "electronics"
+# winit/glow load these at runtime (dlopen), so dpkg cannot infer them.
+depends = ["libc6 (>= 2.35)", "libgl1", "libegl1", "libxkbcommon0", "libxkbcommon-x11-0", "libwayland-client0", "libx11-6", "libxcursor1", "libxi6", "libxrandr2"]
