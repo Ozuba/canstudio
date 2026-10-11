@@ -93,6 +93,30 @@ pub mod dialog {
     }
 }
 
+/// A drag-and-drop source that is also clickable. Unlike `Ui::dnd_drag_source`
+/// (drag only), clicks and context menus on it still work; a drag starts
+/// only once the pointer moves, and the contents follow the pointer.
+pub fn drag_item<P: std::any::Any + Send + Sync>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    payload: P,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    if ui.ctx().is_being_dragged(id) {
+        egui::DragAndDrop::set_payload(ui.ctx(), payload);
+        let layer = egui::LayerId::new(egui::Order::Tooltip, id);
+        let resp = ui.scope_builder(egui::UiBuilder::new().layer_id(layer), add_contents).response;
+        if let Some(p) = ui.ctx().pointer_interact_pos() {
+            ui.ctx().transform_layer_shapes(layer, egui::emath::TSTransform::from_translation(p - resp.rect.center()));
+        }
+        return resp;
+    }
+    let rect = ui.scope(add_contents).response.rect;
+    let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
+    resp.dnd_set_drag_payload(payload);
+    resp
+}
+
 /// A small coloured square, used in legends.
 pub fn swatch(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());

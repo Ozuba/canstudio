@@ -116,7 +116,8 @@ impl Pane {
             })
             .collect();
 
-        self.header(ui, s, fc, &live, active, &mut ev);
+        // Removal is applied after drawing: `live` holds indices into `self.traces`.
+        let removed = self.header(ui, s, fc, &live, active, &mut ev);
 
         let visible: Vec<&Live> = live.iter().filter(|l| self.traces[l.idx].visible).collect();
         let strips: Vec<&Live> =
@@ -292,6 +293,9 @@ impl Pane {
         if response.dnd_hover_payload::<SignalDrag>().is_some() || response.dnd_hover_payload::<TraceDrag>().is_some() {
             ui.painter().rect_stroke(response.rect, 2.0, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
         }
+        if let Some(i) = removed {
+            self.traces.remove(i);
+        }
         ev
     }
 
@@ -310,7 +314,15 @@ impl Pane {
         }
     }
 
-    fn header(&mut self, ui: &mut egui::Ui, s: &mut Session, fc: &FrameCtx, live: &[Live], active: bool, ev: &mut PaneEvents) {
+    fn header(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &mut Session,
+        fc: &FrameCtx,
+        live: &[Live],
+        active: bool,
+        ev: &mut PaneEvents,
+    ) -> Option<usize> {
         let mut remove = None;
         ui.horizontal(|ui| {
             let marker = if active { "▶" } else { " " };
@@ -332,24 +344,22 @@ impl Pane {
                 });
                 let id = egui::Id::new(("trace", self.id, idx));
                 let payload = TraceDrag { pane: self.id, trace: idx };
-                let resp = ui
-                    .dnd_drag_source(id, payload, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            util::swatch(ui, if t.visible { t.color } else { t.color.gamma_multiply(0.25) });
-                            let mut text = RichText::new(label);
-                            if l.is_none() {
-                                text = text.strikethrough().weak();
-                            } else if !t.visible {
-                                text = text.weak();
-                            }
-                            ui.label(text);
-                            if let Some(v) = value {
-                                ui.label(RichText::new(v).monospace().weak());
-                            }
-                        });
-                    })
-                    .response;
+                let resp = util::drag_item(ui, id, payload, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        util::swatch(ui, if t.visible { t.color } else { t.color.gamma_multiply(0.25) });
+                        let mut text = RichText::new(label);
+                        if l.is_none() {
+                            text = text.strikethrough().weak();
+                        } else if !t.visible {
+                            text = text.weak();
+                        }
+                        ui.label(text);
+                        if let Some(v) = value {
+                            ui.label(RichText::new(v).monospace().weak());
+                        }
+                    });
+                });
                 let resp = resp.on_hover_text(match l {
                     Some(l) => format!(
                         "{}.{}\n{} [{} … {}] {}\nClick: show/hide · Drag: move to another pane · Right-click: options",
@@ -365,10 +375,25 @@ impl Pane {
                 if resp.clicked() {
                     t.visible = !t.visible;
                 }
-                resp.context_menu(|ui| {
+                // Stays open while picking colours; a nested colour popup would close it.
+                egui::Popup::context_menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                    ui.label(RichText::new("Colour").weak());
                     ui.horizontal(|ui| {
-                        ui.label("Colour");
-                        ui.color_edit_button_srgba(&mut t.color);
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for (i, c) in util::PALETTE.into_iter().enumerate() {
+                            let stroke = if c == t.color { ui.visuals().strong_text_color() } else { Color32::TRANSPARENT };
+                            let swatch =
+                                egui::Button::new("").fill(c).stroke(egui::Stroke::new(2.0, stroke)).min_size(egui::vec2(16.0, 16.0));
+                            let name = format!("Colour {}", i + 1);
+                            let resp = ui.add(swatch);
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+                            if resp.on_hover_text(&name).clicked() {
+                                t.color = c;
+                            }
+                        }
+                    });
+                    ui.collapsing("Custom colour…", |ui| {
+                        egui::color_picker::color_picker_color32(ui, &mut t.color, egui::color_picker::Alpha::Opaque);
                     });
                     ui.add(egui::Slider::new(&mut t.width, 0.5..=5.0).text("width"));
                     ui.label(RichText::new("Style").weak());
@@ -395,9 +420,7 @@ impl Pane {
                 ui.menu_button("⚙", |ui| self.options(ui, ev));
             });
         });
-        if let Some(i) = remove {
-            self.traces.remove(i);
-        }
+        remove
     }
 }
 
@@ -475,4 +498,87 @@ fn fmt_time_mark(mark: GridMark, absolute: bool, t0: f64) -> String {
 
 pub fn fmt_time(t: f64, absolute: bool, t0: f64) -> String {
     if absolute { crate::util::fmt_wallclock(t0 + t, true) } else { format!("{t:.6} s") }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    //! Drive the real pane UI headlessly: clicks, right-click menus, colour picking.
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    struct State {
+        pane: Pane,
+        session: Session,
+    }
+
+    fn harness(signals: &[&str]) -> Harness<'static, State> {
+        let mut pane = Pane::new(1);
+        for sig in signals {
+            pane.traces.push(Trace::new("Msg", sig, Color32::RED));
+        }
+        let fc =
+            FrameCtx { link: egui::Id::new("link"), pending: None, absolute: false, t0: 0.0, cursors: [None, None], show_x_axis: true };
+        let mut h = Harness::builder().with_size(egui::vec2(900.0, 500.0)).build_ui_state(
+            move |ui, st: &mut State| {
+                st.pane.ui(ui, &mut st.session, &fc, 300.0, true);
+            },
+            State { pane, session: Session::default() },
+        );
+        h.run();
+        h
+    }
+
+    fn open_menu(h: &mut Harness<'static, State>, sig: &str) {
+        h.get_by_label(sig).click_secondary();
+        h.run();
+        assert!(h.query_by_label("🗑 Remove").is_some(), "context menu did not open");
+    }
+
+    #[test]
+    fn left_click_toggles_visibility() {
+        let mut h = harness(&["Sig"]);
+        h.get_by_label("Sig").click();
+        h.run();
+        assert!(!h.state().pane.traces[0].visible);
+    }
+
+    #[test]
+    fn palette_swatch_sets_colour_and_keeps_menu_open() {
+        let mut h = harness(&["Sig"]);
+        open_menu(&mut h, "Sig");
+        h.get_by_label("Colour 3").click();
+        h.run();
+        assert_eq!(h.state().pane.traces[0].color, util::PALETTE[2]);
+        assert!(h.query_by_label("🗑 Remove").is_some(), "menu closed after picking a colour");
+    }
+
+    #[test]
+    fn custom_colour_picker_edits_the_colour_inside_the_menu() {
+        let mut h = harness(&["Sig"]);
+        open_menu(&mut h, "Sig");
+        h.get_by_label("Custom colour…").click();
+        h.run();
+        assert!(h.query_by_label("🗑 Remove").is_some(), "menu closed when opening the picker");
+        // Type a new green component into the picker's G field.
+        h.get_by_value("G 0").click();
+        h.run();
+        // The field is now a text edit holding "0": select it and type over it.
+        h.key_combination_modifiers(egui::Modifiers::COMMAND, &[egui::Key::A]);
+        h.query_all_by_value("0").next().expect("G field in edit mode").type_text("200");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().pane.traces[0].color, Color32::from_rgb(255, 200, 0));
+        assert!(h.query_by_label("🗑 Remove").is_some(), "menu closed while editing the colour");
+    }
+
+    #[test]
+    fn removing_the_last_signal_does_not_panic() {
+        // Regression: removal used to shift indices while the pane was still drawing.
+        let mut h = harness(&["A", "B"]);
+        open_menu(&mut h, "B");
+        h.get_by_label("🗑 Remove").click();
+        h.run();
+        let names: Vec<_> = h.state().pane.traces.iter().map(|t| t.sig.clone()).collect();
+        assert_eq!(names, ["A"]);
+    }
 }

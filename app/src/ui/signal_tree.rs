@@ -60,20 +60,18 @@ impl SignalTree {
                                 focus.and_then(|t| s.store.last_before(m.id, t)).and_then(|f| m.decode(si, f.data)).map(|v| sig.format(v));
                             let plotted = plots.plotted(&m.name, &sig.name);
                             let id = egui::Id::new(("tree_sig", mi, si, m.id));
-                            let resp = ui
-                                .dnd_drag_source(id, drag.clone(), |ui| {
-                                    ui.horizontal(|ui| {
-                                        let mut name = RichText::new(&sig.name);
-                                        if plotted {
-                                            name = name.strong().underline();
-                                        }
-                                        ui.label(name);
-                                        if let Some(v) = value {
-                                            ui.label(RichText::new(v).monospace().weak().small());
-                                        }
-                                    });
-                                })
-                                .response;
+                            let resp = util::drag_item(ui, id, drag.clone(), |ui| {
+                                ui.horizontal(|ui| {
+                                    let mut name = RichText::new(&sig.name);
+                                    if plotted {
+                                        name = name.strong().underline();
+                                    }
+                                    ui.label(name);
+                                    if let Some(v) = value {
+                                        ui.label(RichText::new(v).monospace().weak().small());
+                                    }
+                                });
+                            });
                             let resp = resp.on_hover_text(format!(
                                 "{} bit {}{}\nscale ×{} {:+}\nrange [{} … {}] {}\n{}Click to plot, drag onto a pane.",
                                 sig.size(),
