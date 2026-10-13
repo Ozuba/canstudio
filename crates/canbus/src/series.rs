@@ -48,6 +48,13 @@ impl Series {
             .map(|i| (self.t[i], self.v[i]))
     }
 
+    /// Typical update period, from the last few samples (None with fewer than 2).
+    pub fn recent_period(&self) -> Option<f64> {
+        let n = self.t.len();
+        let k = n.checked_sub(1)?.min(10);
+        (k > 0).then(|| (self.t[n - 1] - self.t[n - 1 - k]) / k as f64)
+    }
+
     /// (min, max) of the values in an index range, ignoring NaNs.
     pub fn bounds(&self, range: std::ops::Range<usize>) -> Option<(f64, f64)> {
         self.v[range].iter().filter(|v| v.is_finite()).fold(None, |acc, &v| match acc {
@@ -139,5 +146,6 @@ mod tests {
         assert_eq!(s.nearest(1.6), Some((2.0, 5.0)));
         assert_eq!(s.visible(0.5, 1.5), 0..3);
         assert_eq!(s.bounds(0..4), Some((1.0, 21.0)));
+        assert_eq!(s.recent_period(), Some(10.0 / 3.0));
     }
 }

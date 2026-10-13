@@ -27,6 +27,20 @@ fn flag_text(f: u8) -> String {
     s
 }
 
+/// Name column text for an error frame: its decoded classes.
+pub fn error_text(key: u32, data: &[u8]) -> String {
+    format!("Error: {}", describe_error(key & !canbus::frame::ERROR_KEY, data))
+}
+
+/// Message column: the DBC name, or what an error frame reports.
+fn message_text(s: &Session, key: u32, data: &[u8]) -> String {
+    match s.db.message(key) {
+        Some(m) => m.name.clone(),
+        None if is_error_key(key) => error_text(key, data),
+        None => String::new(),
+    }
+}
+
 /// One-line decoded summary of a frame.
 fn decoded(s: &Session, key: u32, data: &[u8]) -> String {
     if is_error_key(key) {
@@ -194,7 +208,7 @@ impl TraceView {
                         ui.label(text(fmt_key(f.key)));
                     });
                     row.col(|ui| {
-                        ui.label(s.db.message(f.key).map_or("", |m| m.name.as_str()));
+                        ui.label(message_text(s, f.key, f.data));
                     });
                     row.col(|ui| {
                         ui.label(text(flag_text(f.flags)));
@@ -261,6 +275,7 @@ pub struct MonitorView {
     selected: Option<u32>,
     /// Highlight bytes changed within this many seconds.
     highlight: f64,
+    hide_decoded: bool,
 }
 
 impl MonitorView {
@@ -283,6 +298,10 @@ impl MonitorView {
                 .weak(),
             );
             ui.add(egui::DragValue::new(&mut self.highlight).range(0.05..=60.0).speed(0.05).prefix("highlight changes < ").suffix(" s"));
+            let mut decode = !self.hide_decoded;
+            if ui.checkbox(&mut decode, "Decode").changed() {
+                self.hide_decoded = !decode;
+            }
         });
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         let filter = self.filter.to_lowercase();
@@ -353,9 +372,10 @@ impl MonitorView {
             .column(Column::initial(70.0))
             .column(Column::initial(80.0))
             .column(Column::initial(70.0))
-            .column(Column::remainder())
+            .column(Column::initial(250.0))
+            .column(Column::remainder().clip(true))
             .header(20.0, |mut h| {
-                for title in ["ID", "Message", "Count", "Period", "Age", "Data"] {
+                for title in ["ID", "Message", "Count", "Period", "Age", "Data", "Decoded"] {
                     h.col(|ui| {
                         ui.strong(title);
                     });
@@ -369,7 +389,7 @@ impl MonitorView {
                         ui.monospace(fmt_key(r.key));
                     });
                     row.col(|ui| {
-                        ui.label(s.db.message(r.key).map_or("", |m| m.name.as_str()));
+                        ui.label(message_text(s, r.key, &r.data));
                     });
                     row.col(|ui| {
                         ui.monospace(r.count.to_string());
@@ -398,6 +418,11 @@ impl MonitorView {
                                 ui.label(t);
                             }
                         });
+                    });
+                    row.col(|ui| {
+                        if !self.hide_decoded && !r.data.is_empty() {
+                            ui.label(RichText::new(decoded(s, r.key, &r.data)).small());
+                        }
                     });
                     if row.response().clicked() {
                         clicked = Some(r.key);

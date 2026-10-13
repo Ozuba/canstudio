@@ -32,6 +32,58 @@ pub fn list_interfaces() -> Vec<String> {
     out
 }
 
+/// Controller state as reported by the kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BusState {
+    Active,
+    Warning,
+    Passive,
+    BusOff,
+    Stopped,
+}
+
+impl BusState {
+    pub fn label(self) -> &'static str {
+        match self {
+            BusState::Active => "ERROR-ACTIVE",
+            BusState::Warning => "ERROR-WARNING",
+            BusState::Passive => "ERROR-PASSIVE",
+            BusState::BusOff => "BUS-OFF",
+            BusState::Stopped => "STOPPED",
+        }
+    }
+}
+
+/// Interface configuration and health, read over netlink (no privileges needed).
+/// Fields are `None` where the driver does not report them (e.g. `vcan`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LinkInfo {
+    pub state: Option<BusState>,
+    pub bitrate: Option<u32>,
+    pub data_bitrate: Option<u32>,
+    /// Transmit / receive error counters.
+    pub errors: Option<(u16, u16)>,
+}
+
+/// Best-effort query of an interface's bitrate, state and error counters.
+pub fn link_info(iface: &str) -> LinkInfo {
+    use socketcan::nl::{CanInterface, CanState};
+    let Ok(nl) = CanInterface::open(iface) else { return LinkInfo::default() };
+    let state = nl.state().ok().flatten().map(|s| match s {
+        CanState::ErrorActive => BusState::Active,
+        CanState::ErrorWarning => BusState::Warning,
+        CanState::ErrorPassive => BusState::Passive,
+        CanState::BusOff => BusState::BusOff,
+        CanState::Stopped | CanState::Sleeping => BusState::Stopped,
+    });
+    LinkInfo {
+        state,
+        bitrate: nl.bit_timing().ok().flatten().map(|t| t.bitrate).filter(|&b| b > 0),
+        data_bitrate: nl.data_bit_timing().ok().flatten().map(|t| t.bitrate).filter(|&b| b > 0),
+        errors: nl.berr_counter().ok().flatten().map(|c| (c.txerr, c.rxerr)),
+    }
+}
+
 fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }

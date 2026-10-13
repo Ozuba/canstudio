@@ -147,9 +147,10 @@ impl Transmit {
             #[cfg(target_os = "linux")]
             if let Some(bus) = s.live() {
                 let (sent, err) = bus.scheduler.status();
-                ui.label(RichText::new(format!("{sent} periodic frames sent")).weak());
+                ui.label(RichText::new(format!("{sent} periodic frames queued")).weak())
+                    .on_hover_text("Handed to the interface. Frames only leave the adapter once another node acknowledges them.");
                 if let Some(e) = err {
-                    ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+                    ui.label(RichText::new(tx_error_hint(&e)).color(ui.visuals().error_fg_color)).on_hover_text(e);
                 }
             }
         });
@@ -205,7 +206,7 @@ impl Transmit {
         if let Some(bus) = s.live() {
             let errors: Vec<String> = send_now.iter().filter_map(|f| bus.send(f).err().map(|e| e.to_string())).collect();
             if let Some(e) = errors.first() {
-                s.error(format!("Send failed: {e}"));
+                s.error(tx_error_hint(e));
             }
         }
     }
@@ -275,5 +276,17 @@ fn editor(ui: &mut egui::Ui, s: &Session, job: &mut Job) {
                 }
             });
         }
+    }
+}
+
+/// Explain the usual transmit failures in bus terms.
+pub fn tx_error_hint(err: &str) -> String {
+    if err.contains("os error 105") {
+        "Transmit queue full: frames are not being acknowledged (no other powered node on the bus, missing termination, or wrong bitrate?)"
+            .into()
+    } else if err.contains("os error 100") {
+        "Interface is down or bus-off: restart it (sudo ip link set <iface> down && up)".into()
+    } else {
+        format!("Transmit failed: {err}")
     }
 }

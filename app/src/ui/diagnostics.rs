@@ -10,6 +10,7 @@ use egui_plot::{Line, Plot, PlotPoints};
 use serde::{Deserialize, Serialize};
 
 use super::plot::PlotWorkspace;
+use super::trace::error_text;
 use crate::session::Session;
 use crate::util;
 
@@ -50,6 +51,7 @@ struct Cached {
     at: Instant,
     stats: BusStats,
     timeline: Vec<[f64; 2]>,
+    start: f64,
     end: f64,
 }
 
@@ -119,7 +121,7 @@ impl Diagnostics {
         let stats = stats::compute(&s.store, range.clone(), s.bitrate, span);
         let bin = ((b - a) / 150.0).max(0.01);
         let timeline = stats::load_timeline(&s.store, range, bin, s.bitrate);
-        self.cache = Some(Cached { key, at: Instant::now(), stats, timeline, end: b });
+        self.cache = Some(Cached { key, at: Instant::now(), stats, timeline, start: a, end: b });
     }
 
     fn status(&self, s: &Session, st: &IdStats, end: f64) -> Status {
@@ -188,7 +190,9 @@ impl Diagnostics {
                     l if l > 0.5 => Color32::from_rgb(0xed, 0xc9, 0x48),
                     _ => Color32::from_rgb(0x59, 0xc1, 0x4f),
                 };
-                ui.add(egui::ProgressBar::new(load.min(1.0)).fill(color).text(format!("Bus load {:.1} %", load * 100.0)));
+                // An empty bar would still draw a rounded dot; hide the fill at ~0 %.
+                let fill = if load < 0.005 { egui::Color32::TRANSPARENT } else { color };
+                ui.add(egui::ProgressBar::new(load.min(1.0)).fill(fill).text(format!("Bus load {:.1} %", load * 100.0)));
                 if load > 1.0 {
                     ui.label(
                         RichText::new("Load above 100 %: the configured bitrate is lower than the bus's.")
@@ -218,12 +222,17 @@ impl Diagnostics {
                 }
             });
             let pts: Vec<[f64; 2]> = c.timeline.iter().map(|p| [p[0], p[1] * 100.0]).collect();
-            Plot::new("bus_load").height(130.0).include_y(0.0).include_y(100.0).allow_scroll(false).y_axis_label("load %").show(
-                ui,
-                |pui| {
+            Plot::new("bus_load")
+                .height(130.0)
+                .include_x(c.start)
+                .include_x(c.end)
+                .include_y(0.0)
+                .include_y(100.0)
+                .allow_scroll(false)
+                .y_axis_label("load %")
+                .show(ui, |pui| {
                     pui.line(Line::new("bus load", PlotPoints::new(pts)).fill(0.0).color(Color32::from_rgb(0x4e, 0x9a, 0xf0)));
-                },
-            );
+                });
         });
     }
 
@@ -308,7 +317,11 @@ impl Diagnostics {
                     let ms = |v: f64| if st.count > 1 { util::fmt_duration(v) } else { "—".into() };
                     let cells = [
                         fmt_key(st.key),
-                        m.map_or(String::new(), |m| m.name.clone()),
+                        match m {
+                            Some(m) => m.name.clone(),
+                            None if is_error_key(st.key) => error_text(st.key, s.store.data(st.last_index)),
+                            None => String::new(),
+                        },
                         st.count.to_string(),
                         format!("{:.1}", st.rate()),
                         ms(st.period_mean),

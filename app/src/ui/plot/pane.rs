@@ -4,7 +4,7 @@
 use std::cell::Cell;
 
 use eframe::egui::{self, Color32, RichText};
-use egui_plot::{GridMark, Line, Plot, PlotPoints, Points, VLine};
+use egui_plot::{GridMark, Line, Plot, PlotPoint, PlotPoints, Points, Text, VLine};
 use serde::{Deserialize, Serialize};
 
 use super::{CURSOR_COLORS, FrameCtx, PaneEvents, TraceDrag, decimate::decimate};
@@ -82,6 +82,9 @@ pub struct Pane {
     pub strips: bool,
     #[serde(skip)]
     menu_x: Option<f64>,
+    /// Smoothed Y range while live, so the axis does not jump every frame.
+    #[serde(skip)]
+    smooth_y: Option<(f64, f64)>,
 }
 
 impl Default for Pane {
@@ -100,7 +103,7 @@ struct Live {
 
 impl Pane {
     pub fn new(id: u64) -> Self {
-        Pane { id, traces: Vec::new(), autoscale: Autoscale::Visible, xy: false, strips: true, menu_x: None }
+        Pane { id, traces: Vec::new(), autoscale: Autoscale::Visible, xy: false, strips: true, menu_x: None, smooth_y: None }
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, s: &mut Session, fc: &FrameCtx, height: f32, active: bool) -> PaneEvents {
@@ -141,6 +144,7 @@ impl Pane {
             plot = plot
                 .link_axis(fc.link, [true, false])
                 .link_cursor(fc.link, [true, false])
+                .allow_scroll(false)
                 .x_axis_formatter(move |mark, _| fmt_time_mark(mark, absolute, t0));
             if self.autoscale != Autoscale::Off {
                 plot = plot.allow_drag([true, false]).allow_zoom([true, false]);
@@ -165,17 +169,39 @@ impl Pane {
 
         let autoscale = self.autoscale;
         let xy = self.xy;
+        let mut smooth_y = self.smooth_y.filter(|_| fc.live_now.is_some());
         let traces = &self.traces;
         let resp = plot.show(ui, |pui| {
             if let (Some((a, b)), false) = (fc.pending, xy) {
                 pui.set_plot_bounds_x(a..=b);
             }
             let bounds = pui.plot_bounds();
-            let (x0, x1) = (bounds.min()[0], bounds.max()[0]);
+            let (mut x0, mut x1) = (bounds.min()[0], bounds.max()[0]);
             let px = pui.transform().frame().width() as usize;
             if xy {
                 draw_xy(pui, s, traces, &visible);
-                return (x0, x1);
+                return (x0, x1, egui::Vec2::ZERO);
+            }
+            // Mouse wheel: vertical zooms time around the pointer, horizontal pans.
+            // (Ctrl+wheel still zooms both axes via egui_plot.) Consumed so the pane
+            // list underneath does not scroll at the same time.
+            let wheel = if pui.response().hovered() {
+                pui.ctx().input(|i| if i.modifiers.ctrl || i.modifiers.command { egui::Vec2::ZERO } else { i.smooth_scroll_delta })
+            } else {
+                egui::Vec2::ZERO
+            };
+            if wheel != egui::Vec2::ZERO {
+                if wheel.y != 0.0 {
+                    let f = (wheel.y as f64 * 0.003).exp();
+                    let c = pui.pointer_coordinate().map_or((x0 + x1) / 2.0, |p| p.x);
+                    (x0, x1) = (c - (c - x0) / f, c + (x1 - c) / f);
+                }
+                if wheel.x != 0.0 {
+                    let dx = -wheel.x as f64 * (x1 - x0) / px.max(1) as f64;
+                    (x0, x1) = (x0 + dx, x1 + dx);
+                }
+                pui.set_plot_bounds_x(x0..=x1);
+                pui.ctx().input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
             }
             let mut y: Option<(f64, f64)> = None;
             for l in &visible {
@@ -185,7 +211,21 @@ impl Pane {
                 if let Some((lo, hi)) = series.bounds(range.clone()) {
                     y = Some(y.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
                 }
-                let pts = decimate(&series.t, &series.v, range, x0, x1, px, l.style == Style::Step);
+                let mut pts = decimate(&series.t, &series.v, range, x0, x1, px, l.style == Style::Step);
+                // Live: hold the latest value up to "now" and tag it at the right edge.
+                if let (Some(now), Some(&[t_last, v_last])) = (fc.live_now, pts.last())
+                    && !is_stale(series, now)
+                {
+                    if l.style != Style::Points && t_last < now {
+                        pts.push([now, v_last]);
+                    }
+                    // Above the line, unless that would clip at the top of the plot.
+                    let b = pui.plot_bounds();
+                    let near_top = b.max()[1] - v_last < (b.max()[1] - b.min()[1]) * 0.15;
+                    let anchor = if near_top { egui::Align2::RIGHT_TOP } else { egui::Align2::RIGHT_BOTTOM };
+                    let tag = RichText::new(l.sig.format(v_last)).monospace().size(11.0);
+                    pui.text(Text::new("", PlotPoint::new(now, v_last), tag).anchor(anchor).color(t.color));
+                }
                 let name = format!("{}.{}", t.msg, t.sig);
                 match l.style {
                     Style::Points => pui.points(Points::new(name, PlotPoints::new(pts)).color(t.color).radius(t.width + 0.5)),
@@ -206,26 +246,44 @@ impl Pane {
                 let frac = (strip_px / pui.transform().frame().height().max(1.0) as f64).min(0.6);
                 let pad = ((hi - lo) * 0.06).max(if hi == lo { lo.abs().max(1.0) * 0.1 } else { 0.0 });
                 let top = hi + pad + (hi - lo + 2.0 * pad) * frac / (1.0 - frac);
-                pui.set_plot_bounds_y(lo - pad..=top);
+                let (mut lo, mut hi) = (lo - pad, top);
+                if fc.live_now.is_some() {
+                    // Expand at once to show new extremes; shrink back over about a second.
+                    let dt = pui.ctx().input(|i| i.stable_dt) as f64;
+                    let k = 1.0 - (-dt / 0.8).exp();
+                    if let Some((cur_lo, cur_hi)) = smooth_y {
+                        lo = if lo < cur_lo { lo } else { cur_lo + (lo - cur_lo) * k };
+                        hi = if hi > cur_hi { hi } else { cur_hi + (hi - cur_hi) * k };
+                    }
+                    smooth_y = Some((lo, hi));
+                }
+                pui.set_plot_bounds_y(lo..=hi);
             }
             for (i, c) in fc.cursors.iter().enumerate() {
                 if let Some(t) = c {
                     pui.vline(VLine::new(["A", "B"][i], *t).color(CURSOR_COLORS[i]).width(1.0));
                 }
             }
-            (x0, x1)
+            (x0, x1, wheel)
         });
+        self.smooth_y = smooth_y;
 
         let response = &resp.response;
         let transform = resp.transform;
         if !xy {
-            ev.bounds_x = Some(resp.inner);
+            ev.bounds_x = Some((resp.inner.0, resp.inner.1));
             if !strips.is_empty() {
                 draw_strips(ui, s, &strips, &transform);
             }
         }
-        if response.dragged() || (response.hovered() && ui.input(|i| i.smooth_scroll_delta != egui::Vec2::ZERO)) {
+        // Zoom (Ctrl+scroll, pinch) keeps following and resizes the window; panning
+        // (drag, plain scroll, box zoom) means the user is inspecting the past.
+        let wheel = resp.inner.2;
+        let zooming = (wheel.y != 0.0 && wheel.x == 0.0) || (response.hovered() && ui.input(|i| i.zoom_delta() != 1.0));
+        if response.dragged() || wheel.x != 0.0 {
             ev.user_moved = true;
+        } else if zooming {
+            ev.zoomed = true;
         }
 
         let pointer_x = response.hover_pos().map(|p| transform.value_from_position(p).x);
@@ -342,6 +400,14 @@ impl Pane {
                     let at = fc.cursors[0].unwrap_or(f64::INFINITY);
                     s.series(l.r).at(at).map(|(_, v)| l.sig.format(v))
                 });
+                // Live and not inspecting a cursor: flag signals that stopped updating.
+                let stale = match (l, fc.live_now, fc.cursors[0]) {
+                    (Some(l), Some(now), None) => {
+                        let series = s.series(l.r);
+                        !series.is_empty() && is_stale(series, now)
+                    }
+                    _ => false,
+                };
                 let id = egui::Id::new(("trace", self.id, idx));
                 let payload = TraceDrag { pane: self.id, trace: idx };
                 let resp = util::drag_item(ui, id, payload, |ui| {
@@ -357,6 +423,9 @@ impl Pane {
                         ui.label(text);
                         if let Some(v) = value {
                             ui.label(RichText::new(v).monospace().weak());
+                        }
+                        if stale {
+                            ui.label(RichText::new("stale").small().color(ui.visuals().warn_fg_color));
                         }
                     });
                 });
@@ -422,6 +491,12 @@ impl Pane {
         });
         remove
     }
+}
+
+/// A signal is stale when it has not updated for 3× its recent period (at least 250 ms).
+fn is_stale(series: &canbus::Series, now: f64) -> bool {
+    let Some(&last) = series.t.last() else { return true };
+    now - last > (3.0 * series.recent_period().unwrap_or(1.0)).max(0.25)
 }
 
 /// Height of one value-table strip in pixels.
@@ -516,8 +591,15 @@ mod ui_tests {
         for sig in signals {
             pane.traces.push(Trace::new("Msg", sig, Color32::RED));
         }
-        let fc =
-            FrameCtx { link: egui::Id::new("link"), pending: None, absolute: false, t0: 0.0, cursors: [None, None], show_x_axis: true };
+        let fc = FrameCtx {
+            link: egui::Id::new("link"),
+            pending: None,
+            absolute: false,
+            t0: 0.0,
+            cursors: [None, None],
+            show_x_axis: true,
+            live_now: None,
+        };
         let mut h = Harness::builder().with_size(egui::vec2(900.0, 500.0)).build_ui_state(
             move |ui, st: &mut State| {
                 st.pane.ui(ui, &mut st.session, &fc, 300.0, true);
@@ -532,6 +614,16 @@ mod ui_tests {
         h.get_by_label(sig).click_secondary();
         h.run();
         assert!(h.query_by_label("🗑 Remove").is_some(), "context menu did not open");
+    }
+
+    #[test]
+    fn staleness_follows_the_signal_period() {
+        let mut series = canbus::Series::default();
+        assert!(is_stale(&series, 0.0), "no data counts as stale");
+        series.t = (0..20).map(|i| i as f64 * 0.1).collect();
+        series.v = vec![0.0; 20];
+        assert!(!is_stale(&series, 2.1), "within 3 periods");
+        assert!(is_stale(&series, 2.3), "missed 3 updates of a 100 ms signal");
     }
 
     #[test]

@@ -88,7 +88,8 @@ Building needs Rust 1.95+, and `rust-toolchain.toml` pins a suitable toolchain.
   - zoom to the A–B cursors
   - wall-clock time axis
   - recording overview strip (click or drag to navigate)
-  - live **Follow** mode
+  - live **Follow** mode: zooming keeps following, panning stops it
+- Live: each line is held up to "now" with its current value tagged at the right edge, the Y range eases instead of jumping, and signals that stop updating are marked stale.
 - Autoscale modes: visible data, DBC min/max, or manual. XY mode.
 - Cursors: click places A, Shift+click places B. The readout shows values at A and B, Δ, Δt, 1/Δt, and min/max/mean between the cursors.
 - Export:
@@ -160,7 +161,7 @@ Layout, panes, transmit jobs and opened databases persist between runs.
 
 | Context | Keys |
 |---|---|
-| Plots | Drag: pan · Scroll: zoom · Right-drag: box zoom · Click / Shift+click: cursors A / B · F: fit · ←/→: pan · +/−: zoom · Home/End · Space: follow (live) |
+| Plots | Wheel: zoom time (keeps Follow) · Shift+wheel / drag: pan · Ctrl+wheel: zoom both axes · Right-drag: box zoom · Click / Shift+click: cursors A / B · F: fit · ←/→: pan · +/−: zoom · Home/End · Space: follow (live) |
 | Global | Ctrl+O: open log · Ctrl+D: open DBC |
 | DBC editor | Ctrl+S: save · Ctrl+Z / Ctrl+Y: undo / redo |
 

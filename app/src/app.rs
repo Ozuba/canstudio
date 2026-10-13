@@ -262,7 +262,7 @@ impl App {
             });
             ui.menu_button("Help", |ui| {
                 ui.label(RichText::new("Plots").strong());
-                ui.label("Drag: pan · Scroll / Ctrl+scroll: zoom · Right-drag: box zoom");
+                ui.label("Wheel: zoom time (keeps Follow) · Shift+wheel / drag: pan · Ctrl+wheel: zoom both axes · Right-drag: box zoom");
                 ui.label("Click: cursor A · Shift+click: cursor B · F: fit all");
                 ui.label("Left/Right: pan · +/-: zoom · Home/End: jump · Space: follow (live)");
                 ui.separator();
@@ -292,6 +292,10 @@ impl App {
             self.bus_controls(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(self.session.source_label()).strong());
+                #[cfg(target_os = "linux")]
+                if self.session.is_live() {
+                    link_chip(ui, &self.session);
+                }
                 for db in self.session.dbs.iter_mut().rev() {
                     let name = format!("{}{}", db.name(), if db.dirty { " •" } else { "" });
                     if ui.toggle_value(&mut db.enabled, name).on_hover_text("Use this database for decoding").changed() {
@@ -387,6 +391,57 @@ impl App {
             }
         });
     }
+}
+
+/// Bus state and bitrate of the live interface, coloured by severity.
+#[cfg(target_os = "linux")]
+fn link_chip(ui: &mut egui::Ui, s: &Session) {
+    use canbus::socket::BusState;
+    let Some((_, link)) = &s.link else { return };
+    let Some(state) = link.state else { return };
+    let color = match state {
+        BusState::Active => egui::Color32::from_rgb(0x59, 0xc1, 0x4f),
+        BusState::Warning => egui::Color32::from_rgb(0xed, 0xc9, 0x48),
+        BusState::Passive => egui::Color32::from_rgb(0xf2, 0x8e, 0x2b),
+        BusState::BusOff | BusState::Stopped => egui::Color32::from_rgb(0xe8, 0x57, 0x59),
+    };
+    let mut text = state.label().to_string();
+    if let Some((tx, rx)) = link.errors {
+        text.push_str(&format!(" · TEC {tx} REC {rx}"));
+    }
+    if let Some(b) = link.bitrate {
+        text = format!("{} kbit/s · {text}", b / 1000);
+    }
+    let hint = match state {
+        BusState::Active => "The controller is healthy.",
+        BusState::Warning => "Error counters above 96: errors are occurring on the bus.",
+        BusState::Passive => {
+            "Error counters above 127. Usually no other node acknowledges our frames: check the bus is connected and terminated, the other nodes are powered, and the bitrate matches."
+        }
+        BusState::BusOff => {
+            "The controller left the bus after too many errors. Restart it: sudo ip link set <iface> down && sudo ip link set <iface> up (or configure restart-ms)."
+        }
+        BusState::Stopped => "The interface is stopped.",
+    };
+    // Some drivers (gs_usb/candleLight) report state changes only on errors, never the
+    // recovery. If frames flow with no recent error frames, the state is likely stale.
+    let now = s.now_rel();
+    let last_error = s
+        .store
+        .keys
+        .iter()
+        .filter(|k| canbus::frame::is_error_key(**k))
+        .filter_map(|&k| s.store.indices(k).last())
+        .map(|&i| s.store.ts[i as usize])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let receiving = s.store.time_range().is_some_and(|(_, last)| now - last < 1.0);
+    if state != BusState::Active && receiving && now - last_error > 5.0 {
+        ui.label(RichText::new(format!("{text} (stale?)")).color(color.gamma_multiply(0.5)).monospace()).on_hover_text(format!(
+            "{hint}\n\nNo error frames for over 5 s while frames are being received: the bus is probably healthy again. Some drivers (e.g. gs_usb) only report state changes on errors, so the kernel still shows the last error state."
+        ));
+        return;
+    }
+    ui.label(RichText::new(text).color(color).monospace()).on_hover_text(hint);
 }
 
 struct Tabs<'a> {
@@ -585,5 +640,107 @@ mod smoke_tests {
         assert_eq!(traces.len(), 3);
         assert!(traces.iter().all(|t| t.resolved(s).is_some()), "plotted signals must resolve");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    //! Drives the real app on a real interface. Ignored by default; run with
+    //! `CANSTUDIO_HW_IFACE=can0 cargo test -p canstudio hardware -- --ignored --nocapture`.
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn pump(h: &mut Harness<'_, App>, ms: u64) {
+        let end = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < end {
+            h.run_steps(1);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a CAN interface (CANSTUDIO_HW_IFACE)"]
+    fn live_session_on_hardware() {
+        let iface = std::env::var("CANSTUDIO_HW_IFACE").unwrap_or_else(|_| "can0".into());
+        let dbc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/dbc/tests/data/socialledge.dbc");
+        let args = Args { files: vec![dbc_path], plots: vec![], connect: Some(iface.clone()) };
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|cc| App::new(cc, args));
+        pump(&mut h, 300);
+        assert!(h.state().session.is_live(), "not connected: {:?}", h.state().session.notice.as_ref().map(|n| &n.text));
+
+        // Transmit tab: add a raw frame and send it once, then run it periodically.
+        h.state_mut().focus_tab(Tab::Transmit);
+        pump(&mut h, 100);
+        h.get_by_label("➕ Raw frame").click();
+        pump(&mut h, 100);
+        h.get_by_label("Send").click();
+        pump(&mut h, 200);
+        h.get_by_label("🔁 Periodic").click();
+        pump(&mut h, 2500);
+
+        for tab in Tab::ALL {
+            h.state_mut().focus_tab(tab);
+            pump(&mut h, 150);
+        }
+        let s = &h.state().session;
+        let errors = s.store.keys.iter().filter(|k| canbus::frame::is_error_key(**k)).count();
+        println!("frames captured: {}, keys: {:x?}, error keys: {errors}", s.store.len(), s.store.keys);
+        println!("notice: {:?}", s.notice.as_ref().map(|n| (&n.text, n.error)));
+        if let Some(bus) = s.live() {
+            println!("scheduler: {:?}, rx error: {:?}", bus.scheduler.status(), bus.error());
+        }
+    }
+
+    #[test]
+    #[ignore = "needs vcan0 (see README: unshare -rnm ...)"]
+    fn live_follow_tracks_now_on_vcan() {
+        // Only ever on a virtual bus: this test transmits.
+        let Ok(feeder) = canbus::socket::LiveBus::open("vcan0", || {}) else {
+            eprintln!("vcan0 not present, skipping");
+            return;
+        };
+        // DRIVER_HEARTBEAT (id 100) from socialledge.dbc, every 10 ms.
+        feeder.scheduler.set(1, Some((canbus::Frame::new(100, false, &[1]), Duration::from_millis(10))));
+
+        let dbc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/dbc/tests/data/socialledge.dbc");
+        let args = Args {
+            files: vec![dbc_path],
+            plots: vec![vec!["DRIVER_HEARTBEAT.DRIVER_HEARTBEAT_cmd".into()]],
+            connect: Some("vcan0".into()),
+        };
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|cc| App::new(cc, args));
+        pump(&mut h, 3000);
+
+        let check_tracking = |h: &Harness<'_, App>, what: &str| {
+            let (a, b) = h.state().p.plots.view().expect("view");
+            let now = h.state().session.now_rel();
+            assert!(h.state().p.plots.follow, "{what}: follow switched off");
+            assert!((now - b).abs() < 0.25, "{what}: view end {b:.3} should track now {now:.3}");
+            b - a
+        };
+        let width = check_tracking(&h, "after 3 s");
+        assert!(h.state().session.store.len() > 200, "frames: {}", h.state().session.store.len());
+
+        // Wheel zoom over the plot keeps following, with a narrower window.
+        h.hover_at(egui::pos2(800.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 150.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        pump(&mut h, 1000);
+        let zoomed = check_tracking(&h, "after wheel zoom");
+        assert!(zoomed < width * 0.9, "window {zoomed} should be narrower than {width}");
+
+        // Dragging the plot means inspecting the past: follow stops.
+        h.drag_at(egui::pos2(800.0, 400.0));
+        h.run_steps(2);
+        h.hover_at(egui::pos2(700.0, 400.0));
+        h.run_steps(2);
+        h.drop_at(egui::pos2(700.0, 400.0));
+        pump(&mut h, 200);
+        assert!(!h.state().p.plots.follow, "dragging should stop following");
+        feeder.scheduler.set(1, None);
     }
 }

@@ -73,6 +73,9 @@ pub struct Session {
     recorder: Option<Recorder>,
     pub notice: Option<Notice>,
     scratch: Vec<Frame>,
+    /// Live interface health (state, bitrate), refreshed about once a second.
+    #[cfg(target_os = "linux")]
+    pub link: Option<(Instant, canbus::socket::LinkInfo)>,
 }
 
 impl Default for Session {
@@ -91,6 +94,8 @@ impl Default for Session {
             recorder: None,
             notice: None,
             scratch: Vec::new(),
+            #[cfg(target_os = "linux")]
+            link: None,
         }
     }
 }
@@ -230,7 +235,17 @@ impl Session {
                 self.replace_store(store);
                 self.source = Source::Live(bus);
                 self.paused = false;
-                self.info(format!("Connected to {iface}"));
+                // Use the interface's real bitrates for bus-load figures.
+                let link = canbus::socket::link_info(iface);
+                if let Some(b) = link.bitrate {
+                    self.bitrate.nominal = b;
+                }
+                if let Some(b) = link.data_bitrate {
+                    self.bitrate.data = b;
+                }
+                let rate = link.bitrate.map_or(String::new(), |b| format!(" at {} kbit/s", b / 1000));
+                self.link = Some((Instant::now(), link));
+                self.info(format!("Connected to {iface}{rate}"));
             }
             Err(e) => self.error(format!("Cannot open {iface}: {e}")),
         }
@@ -337,6 +352,9 @@ impl Session {
                 self.source = Source::None;
                 self.stop_recording();
                 self.error(format!("{iface}: {}", error.unwrap_or_else(|| "receive thread stopped".into())));
+            }
+            if self.link.as_ref().is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(1)) {
+                self.link = Some((Instant::now(), canbus::socket::link_info(&iface)));
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }

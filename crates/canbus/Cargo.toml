@@ -13,4 +13,4 @@ memmap2 = "0.9"
 rayon = "1.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-socketcan = { version = "4.0", default-features = false }
+socketcan = { version = "4.0", default-features = false, features = ["netlink"] }

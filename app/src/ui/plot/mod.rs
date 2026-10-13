@@ -82,6 +82,8 @@ pub struct FrameCtx {
     pub t0: f64,
     pub cursors: [Option<f64>; 2],
     pub show_x_axis: bool,
+    /// Current time while capturing live (not paused): lines are held to it.
+    pub live_now: Option<f64>,
 }
 
 /// What a pane asks the workspace to do after drawing.
@@ -89,6 +91,8 @@ pub struct FrameCtx {
 pub struct PaneEvents {
     pub bounds_x: Option<(f64, f64)>,
     pub user_moved: bool,
+    /// Zoomed in place: in follow mode the window width changes, following continues.
+    pub zoomed: bool,
     pub set_cursor: Option<(usize, f64)>,
     pub clear_cursors: bool,
     pub fit: bool,
@@ -167,6 +171,9 @@ impl PlotWorkspace {
             self.cursors = [None, None];
             self.pending = Self::full_range(s);
         }
+        if !s.is_live() {
+            self.follow = false; // only meaningful while capturing
+        }
         if self.follow && live {
             let now = s.now_rel();
             self.pending = Some((now - self.window, now));
@@ -184,7 +191,7 @@ impl PlotWorkspace {
         let readout_h = if readout { 28.0 + 20.0 * self.panes.iter().map(|p| p.traces.len()).sum::<usize>().min(8) as f32 } else { 0.0 };
         let drop_h = 26.0;
         let avail = ui.available_height() - readout_h - drop_h - 8.0;
-        let pane_h = (avail / self.panes.len().max(1) as f32).max(140.0);
+        let pane_h = (avail / self.panes.len().max(1) as f32).max(100.0);
 
         // NaN marks "fit everything".
         if self.pending.is_some_and(|p| p.0.is_nan()) {
@@ -197,6 +204,7 @@ impl PlotWorkspace {
             t0: s.store.t0,
             cursors: self.cursors,
             show_x_axis: true,
+            live_now: live.then(|| s.now_rel()),
         };
 
         let mut events: Vec<(usize, PaneEvents)> = Vec::new();
@@ -226,6 +234,9 @@ impl PlotWorkspace {
             }
             if ev.user_moved {
                 self.follow = false;
+            }
+            if let (true, Some((a, b))) = (ev.zoomed, ev.bounds_x) {
+                self.window = (b - a).clamp(0.001, 3600.0);
             }
             if let Some((c, t)) = ev.set_cursor {
                 self.cursors[c] = Some(t);
@@ -333,10 +344,17 @@ impl PlotWorkspace {
             ui.separator();
             let mut from = a;
             let mut to = b;
+            // Fixed decimals (resolving ~1/1000 of the window) and fixed width, so the
+            // toolbar does not jitter while the values change every frame in follow mode.
+            let decimals = ((3.0 - (b - a).max(1e-9).log10()).ceil()).clamp(0.0, 6.0) as usize;
+            fn field(v: &mut f64, speed: f64, decimals: usize) -> egui::DragValue<'_> {
+                egui::DragValue::new(v).speed(speed).fixed_decimals(decimals).suffix(" s")
+            }
+            let size = egui::vec2(104.0, ui.spacing().interact_size.y);
             ui.label("from");
-            let r1 = ui.add(egui::DragValue::new(&mut from).speed((b - a) * 0.01).max_decimals(6).suffix(" s"));
+            let r1 = ui.add_sized(size, field(&mut from, (b - a) * 0.01, decimals));
             ui.label("to");
-            let r2 = ui.add(egui::DragValue::new(&mut to).speed((b - a) * 0.01).max_decimals(6).suffix(" s"));
+            let r2 = ui.add_sized(size, field(&mut to, (b - a) * 0.01, decimals));
             if (r1.changed() || r2.changed()) && to > from {
                 self.set_view(from, to);
             }
@@ -387,6 +405,11 @@ impl PlotWorkspace {
     }
 
     fn zoom(&mut self, factor: f64) {
+        if self.follow {
+            // Keep following; the next frame re-anchors the new window at "now".
+            self.window = (self.window * factor).clamp(0.001, 3600.0);
+            return;
+        }
         if let Some((a, b)) = self.view {
             let c = self.cursors[0].filter(|c| (a..=b).contains(c)).unwrap_or((a + b) / 2.0);
             self.set_view(c - (c - a) * factor, c + (b - c) * factor);
@@ -499,3 +522,91 @@ impl PlotWorkspace {
 }
 
 pub const CURSOR_COLORS: [Color32; 2] = [Color32::from_rgb(0xff, 0xd1, 0x66), Color32::from_rgb(0x6e, 0xe7, 0xff)];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn following() -> PlotWorkspace {
+        PlotWorkspace { follow: true, window: 10.0, view: Some((-10.0, 0.0)), ..Default::default() }
+    }
+
+    #[test]
+    fn zooming_keeps_follow_and_resizes_the_window() {
+        let mut w = following();
+        w.apply(vec![(0, PaneEvents { zoomed: true, bounds_x: Some((-5.0, 0.0)), ..Default::default() })]);
+        assert!(w.follow);
+        assert_eq!(w.window, 5.0);
+        // Toolbar / keyboard zoom while following.
+        w.zoom(2.0);
+        assert!(w.follow);
+        assert_eq!(w.window, 10.0);
+    }
+
+    #[test]
+    fn panning_disengages_follow() {
+        let mut w = following();
+        w.apply(vec![(0, PaneEvents { user_moved: true, bounds_x: Some((-12.0, -2.0)), ..Default::default() })]);
+        assert!(!w.follow);
+        assert_eq!(w.window, 10.0);
+    }
+
+    /// Real workspace with a loaded (non-live) session, driven by mouse-wheel events.
+    mod wheel {
+        use super::super::*;
+        use crate::session::{DbFile, Session};
+        use egui_kittest::Harness;
+
+        struct State {
+            plots: PlotWorkspace,
+            session: Session,
+        }
+
+        fn harness() -> Harness<'static, State> {
+            let mut session = Session::default();
+            let dbc = dbc::parse("BO_ 1 M: 8 X\n SG_ A : 0|8@1+ (1,0) [0|0] \"\" X\n").unwrap();
+            session.dbs.push(DbFile { path: None, dbc, dirty: false, errors: vec![], enabled: true, encoding: Default::default() });
+            session.recompile();
+            let mut store = canbus::FrameStore::with_t0(0.0);
+            for i in 0..=1000 {
+                store.push(&canbus::Frame { ts: i as f64 * 0.01, ..canbus::Frame::new(1, false, &[(i % 200) as u8]) });
+            }
+            session.store = store;
+            session.store_gen += 1;
+            let mut plots = PlotWorkspace::default();
+            plots.add_signal(&SignalDrag { msg: "M".into(), sig: "A".into() }, Some(0));
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(900.0, 600.0))
+                .build_ui_state(|ui, st: &mut State| st.plots.ui(ui, &mut st.session), State { plots, session });
+            h.run_steps(4);
+            h
+        }
+
+        fn wheel(h: &mut Harness<'static, State>, delta: egui::Vec2) {
+            h.hover_at(egui::pos2(500.0, 330.0)); // over the plot area
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta,
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            });
+            h.run_steps(60); // egui spreads wheel input over several frames
+        }
+
+        #[test]
+        fn wheel_zooms_time_and_horizontal_scroll_pans() {
+            let mut h = harness();
+            let (a, b) = h.state().plots.view().expect("view");
+            assert!((b - a - 10.0).abs() < 0.5, "starts fitted to the 10 s log: {a}..{b}");
+
+            wheel(&mut h, egui::vec2(0.0, 120.0));
+            let (a2, b2) = h.state().plots.view().unwrap();
+            assert!(b2 - a2 < (b - a) * 0.9, "wheel up zooms in: {a2}..{b2}");
+
+            wheel(&mut h, egui::vec2(-80.0, 0.0));
+            let (a3, b3) = h.state().plots.view().unwrap();
+            assert!(((b3 - a3) - (b2 - a2)).abs() < 1e-6, "horizontal scroll keeps the width");
+            assert!(a3 > a2, "and pans in time");
+        }
+    }
+}
