@@ -203,10 +203,11 @@ impl TraceView {
                         ui.label(text(f.data.len().to_string()));
                     });
                     row.col(|ui| {
-                        ui.label(text(util::hex_bytes(f.data)));
+                        let remote = f.flags & flags::RTR != 0;
+                        ui.label(text(if remote { format!("remote request, DLC {}", f.data.len()) } else { util::hex_bytes(f.data) }));
                     });
                     row.col(|ui| {
-                        if !self.hide_decoded || err {
+                        if (!self.hide_decoded || err) && f.flags & flags::RTR == 0 {
                             ui.label(RichText::new(decoded(s, f.key, f.data)).small());
                         }
                     });
@@ -308,7 +309,9 @@ impl MonitorView {
                 let idx = s.store.indices(key);
                 let count = idx.partition_point(|&i| s.store.ts[i as usize] <= at);
                 let last = *idx.get(count.checked_sub(1)?)? as usize;
-                let data = s.store.data(last).to_vec();
+                // Bytes come from the latest frame with a payload (remote requests have none).
+                let data_end = idx[..count].iter().rposition(|&i| !s.store.is_remote(i as usize)).map_or(0, |p| p + 1);
+                let data = data_end.checked_sub(1).map_or_else(Vec::new, |p| s.store.data(idx[p] as usize).to_vec());
                 let period = (count >= 2).then(|| {
                     let back = count.saturating_sub(11);
                     (s.store.ts[last] - s.store.ts[idx[back] as usize]) / (count - 1 - back) as f64
@@ -316,7 +319,10 @@ impl MonitorView {
                 // Age of the last change of each byte, looking back a bounded number of frames.
                 let mut changed = vec![None; data.len()];
                 let mut cur = data.clone();
-                for &j in idx[count.saturating_sub(200)..count.saturating_sub(1)].iter().rev() {
+                for &j in idx[data_end.saturating_sub(200)..data_end.saturating_sub(1)].iter().rev() {
+                    if s.store.is_remote(j as usize) {
+                        continue;
+                    }
                     let prev = s.store.data(j as usize);
                     let t = s.store.ts[j as usize];
                     for (b, slot) in changed.iter_mut().enumerate() {

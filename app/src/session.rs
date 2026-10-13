@@ -18,6 +18,8 @@ pub struct DbFile {
     pub errors: Vec<ParseError>,
     /// Excluded from decoding without unloading.
     pub enabled: bool,
+    /// On-disk text encoding, preserved when saving.
+    pub encoding: dbc::Encoding,
 }
 
 impl DbFile {
@@ -118,7 +120,10 @@ impl Session {
         // Canonical paths so the same file opened two ways is not loaded twice.
         let path = &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         match dbc::read_file(path) {
-            Ok((dbc, errors)) => {
+            Ok(_) if self.dbs.iter().any(|d| d.dirty && d.path.as_deref() == Some(path)) => {
+                self.error(format!("{} is already open with unsaved changes; save or close it first", crate::util::file_name(path)));
+            }
+            Ok((dbc, errors, encoding)) => {
                 let msg = format!(
                     "Loaded {}: {} messages, {} signals{}",
                     crate::util::file_name(path),
@@ -126,7 +131,7 @@ impl Session {
                     dbc.signal_count(),
                     if errors.is_empty() { String::new() } else { format!(", {} problems", errors.len()) }
                 );
-                let file = DbFile { path: Some(path.to_path_buf()), dbc, dirty: false, errors, enabled: true };
+                let file = DbFile { path: Some(path.to_path_buf()), dbc, dirty: false, errors, enabled: true, encoding };
                 match self.dbs.iter().position(|d| d.path.as_deref() == Some(path)) {
                     Some(i) => self.dbs[i] = file,
                     None => self.dbs.push(file),
@@ -150,6 +155,7 @@ impl Session {
             dirty: true,
             errors: Vec::new(),
             enabled: true,
+            encoding: dbc::Encoding::default(),
         });
         self.recompile();
         self.dbs.len() - 1
@@ -162,7 +168,7 @@ impl Session {
             _ => crate::util::dialog::save(&db.name(), "dbc"),
         };
         let Some(path) = path else { return };
-        match std::fs::write(&path, dbc::write(&self.dbs[idx].dbc)) {
+        match dbc::write_file(&path, &self.dbs[idx].dbc, self.dbs[idx].encoding) {
             Ok(()) => {
                 let db = &mut self.dbs[idx];
                 db.path = Some(path.clone());

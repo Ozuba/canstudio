@@ -74,8 +74,10 @@ impl SignalTree {
                             let sig = &m.signals[si];
                             let drag = SignalDrag { msg: m.name.clone(), sig: sig.name.clone() };
                             // Latest value at the focus time, from the raw frames (cheap).
-                            let value =
-                                focus.and_then(|t| s.store.last_before(m.id, t)).and_then(|f| m.decode(si, f.data)).map(|v| sig.format(v));
+                            let value = focus
+                                .and_then(|t| s.store.last_data_before(m.id, t))
+                                .and_then(|f| m.decode(si, f.data))
+                                .map(|v| sig.format(v));
                             let plotted = plots.plotted(&m.name, &sig.name);
                             let id = egui::Id::new(("tree_sig", mi, si, m.id));
                             let resp = util::drag_item(ui, id, drag.clone(), |ui| {
@@ -143,7 +145,14 @@ mod ui_tests {
                    BO_ 512 BOOT: 8 Vector__XXX\n SG_ c : 0|8@1+ (1,0) [0|0] \"\" X\n\
                    BO_ 1024 BMS_TX: 8 BMS\n SG_ d : 0|8@1+ (1,0) [0|0] \"\" X\n";
         let mut session = Session::default();
-        session.dbs.push(crate::session::DbFile { path: None, dbc: dbc::parse(src).unwrap(), dirty: false, errors: vec![], enabled: true });
+        session.dbs.push(crate::session::DbFile {
+            path: None,
+            dbc: dbc::parse(src).unwrap(),
+            dirty: false,
+            errors: vec![],
+            enabled: true,
+            encoding: Default::default(),
+        });
         session.recompile();
         let state = State { tree: SignalTree::default(), session, plots: PlotWorkspace::default(), order: MessageOrder::Id };
         let mut h = Harness::builder()

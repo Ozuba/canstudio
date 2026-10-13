@@ -79,6 +79,9 @@ impl SeriesCache {
             series.t.reserve(idx.len() - series.cursor);
             series.v.reserve(idx.len() - series.cursor);
             for &i in &idx[series.cursor..] {
+                if store.is_remote(i as usize) {
+                    continue;
+                }
                 if let Some(v) = msg.decode(r.sig, store.data(i as usize)) {
                     series.t.push(store.ts[i as usize]);
                     series.v.push(v);
@@ -99,6 +102,19 @@ impl SeriesCache {
 mod tests {
     use super::*;
     use crate::Frame;
+
+    #[test]
+    fn remote_frames_carry_no_values() {
+        // A remote request for the message (RTR, DLC 8) has no payload; it must not plot as zeros.
+        let dbc = dbc::parse("BO_ 5 M: 8 X\n SG_ A : 0|8@1+ (1,0) [0|0] \"\" X\n").unwrap();
+        let db = CompiledDb::new([&dbc]);
+        let mut store = FrameStore::with_t0(0.0);
+        store.push(&Frame { ts: 1.0, ..Frame::new(5, false, &[7; 8]) });
+        store.push(&Frame { ts: 2.0, flags: crate::flags::RTR, len: 8, ..Frame::new(5, false, &[]) });
+        store.push(&Frame { ts: 3.0, ..Frame::new(5, false, &[9; 8]) });
+        let mut cache = SeriesCache::default();
+        assert_eq!(cache.get(&store, &db, SignalRef { msg: 0, sig: 0 }).v, vec![7.0, 9.0]);
+    }
 
     #[test]
     fn incremental_decode() {

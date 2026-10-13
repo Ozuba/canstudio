@@ -123,8 +123,10 @@ impl LiveBus {
             std::thread::Builder::new().name(format!("rx-{iface}")).spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     let res = if has_ts {
-                        sock.read_frame_with_timestamp().map(|(f, t)| {
-                            let ts = t.duration_since(UNIX_EPOCH).map_or_else(|_| now(), |d| d.as_secs_f64());
+                        // Kernel arrival time when attached; a frame without one must not
+                        // be treated as a fatal error, so fall back to host time.
+                        sock.read_frame_with_timestamps().map(|(f, t)| {
+                            let ts = t.socket.and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or_else(now, |d| d.as_secs_f64());
                             (f, ts)
                         })
                     } else {

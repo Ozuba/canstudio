@@ -63,7 +63,15 @@ pub fn write(dbc: &Dbc) -> String {
     }
     for d in &dbc.attribute_defs {
         if let Some(v) = &d.default {
-            let _ = writeln!(out, "BA_DEF_DEF_ \"{}\" {};", d.name, fmt_attr(v));
+            // Enum defaults are written by name (Vector/cantools convention), unlike
+            // per-object enum values which are indices.
+            let v = match (&d.kind, v) {
+                (AttrKind::Enum(names), AttrValue::Int(i)) => {
+                    names.get(*i as usize).map_or_else(|| v.clone(), |n| AttrValue::Str(n.clone()))
+                }
+                _ => v.clone(),
+            };
+            let _ = writeln!(out, "BA_DEF_DEF_ \"{}\" {};", d.name, fmt_attr(&v));
         }
     }
     for (name, v) in &dbc.attributes {
@@ -202,11 +210,19 @@ fn write_value_pairs(out: &mut String, pairs: &[(i64, String)]) {
 /// Format a float the way DBC tools do: integers without a decimal point,
 /// everything else in its shortest round-trippable form.
 pub fn fmt_f64(v: f64) -> String {
-    if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 { format!("{}", v as i64) } else { format!("{v}") }
+    if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else if v != 0.0 && (v.abs() >= 1e15 || v.abs() < 1e-6) {
+        // Exponent form keeps e.g. 3.4E+38 readable instead of 39 digits.
+        format!("{v:e}")
+    } else {
+        format!("{v}")
+    }
 }
 
+/// Only `"` needs escaping in DBC strings; backslashes are literal.
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('"', "\\\"")
 }
 
 const DEFAULT_NS: [&str; 28] = [

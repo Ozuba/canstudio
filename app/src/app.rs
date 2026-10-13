@@ -528,3 +528,62 @@ impl eframe::App for App {
         eframe::set_value(storage, eframe::APP_KEY, &self.p);
     }
 }
+
+#[cfg(test)]
+mod smoke_tests {
+    //! Whole-application smoke test: real App, real files, every tab with data.
+    use super::*;
+    use egui_kittest::Harness;
+
+    #[test]
+    fn every_tab_renders_with_data_loaded() {
+        let dir = std::env::temp_dir().join(format!("canstudio-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dbc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/dbc/tests/data/socialledge.dbc");
+        // Frames for every message of the database, plus an error frame and a remote request.
+        let db = dbc::CompiledDb::new([&dbc::read_file(&dbc_path).unwrap().0]);
+        let mut log = String::new();
+        for k in 0..400 {
+            for m in &db.messages {
+                let (id, ext) = canbus::frame::split_key(m.id);
+                let data: Vec<u8> = (0..m.size as u8).map(|b| b.wrapping_mul((k % 250) as u8 + 1)).collect();
+                let mut f = canbus::Frame::new(id, ext, &data);
+                f.ts = 1000.0 + k as f64 * 0.01;
+                log.push_str(&canbus::candump::format_line(&f, "can0"));
+                log.push('\n');
+            }
+        }
+        log.push_str("(1004.5) can0 20000004#0010000000000000\n(1004.6) can0 064#R8\n");
+        let log_path = dir.join("smoke.log");
+        std::fs::write(&log_path, log).unwrap();
+
+        let args = Args {
+            files: vec![dbc_path, log_path],
+            plots: vec![
+                vec!["DRIVER_HEARTBEAT.DRIVER_HEARTBEAT_cmd".into()],
+                vec!["MOTOR_CMD.MOTOR_CMD_steer".into(), "MOTOR_CMD.MOTOR_CMD_drive".into()],
+            ],
+            connect: None,
+        };
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|cc| App::new(cc, args));
+        // The log loads on a background thread.
+        for _ in 0..200 {
+            h.run_steps(2);
+            if !h.state().session.store.is_empty() && h.state().session.loading_progress().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(h.state().session.store.len(), 400 * db.messages.len() + 2);
+        for tab in Tab::ALL {
+            h.state_mut().focus_tab(tab);
+            h.run_steps(4);
+        }
+        // Plotted signals resolve and decode.
+        let s = &h.state().session;
+        let traces: Vec<_> = h.state().p.plots.panes.iter().flat_map(|p| &p.traces).collect();
+        assert_eq!(traces.len(), 3);
+        assert!(traces.iter().all(|t| t.resolved(s).is_some()), "plotted signals must resolve");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

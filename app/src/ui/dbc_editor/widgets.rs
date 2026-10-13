@@ -157,20 +157,26 @@ pub fn attributes(
 
 /// Flat DBC bit positions (byte*8 + bit-in-byte) a signal occupies.
 pub fn occupied_positions(s: &Signal) -> Vec<u64> {
+    // Positions past a 64-byte frame are irrelevant; capping also keeps a corrupt
+    // length (e.g. 4e9 bits) from allocating gigabytes.
+    let size = s.size.min(MAX_BITS);
     match s.byte_order {
-        ByteOrder::LittleEndian => (s.start_bit..s.start_bit + s.size).collect(),
+        ByteOrder::LittleEndian => (0..size).map(|i| s.start_bit.saturating_add(i)).collect(),
         ByteOrder::BigEndian => {
             // Motorola sawtooth: move toward the LSB, wrapping into the next byte.
-            let mut out = Vec::with_capacity(s.size as usize);
+            let mut out = Vec::with_capacity(size as usize);
             let mut pos = s.start_bit;
-            for _ in 0..s.size {
+            for _ in 0..size {
                 out.push(pos);
-                pos = if pos.is_multiple_of(8) { pos + 15 } else { pos - 1 };
+                pos = if pos.is_multiple_of(8) { pos.saturating_add(15) } else { pos - 1 };
             }
             out
         }
     }
 }
+
+/// Bits in the largest (CAN-FD) frame.
+const MAX_BITS: u64 = 64 * 8;
 
 /// Lowest bit not used by any signal in the message.
 pub fn next_free_bit(m: &Message) -> u64 {
@@ -478,6 +484,14 @@ mod tests {
         assert_eq!(start, 11);
         assert_eq!(occupied_positions(&sig(start, 12, ByteOrder::BigEndian))[4], 23);
         assert_eq!(start_for(&s, 0, 63, 8), None); // last byte cannot hold 12 bits after bit 63's byte
+    }
+
+    #[test]
+    fn corrupt_lengths_do_not_explode() {
+        for order in ByteOrder::ALL {
+            let s = sig(u64::MAX - 3, 4_000_000_000, order);
+            assert_eq!(occupied_positions(&s).len(), MAX_BITS as usize);
+        }
     }
 
     #[test]

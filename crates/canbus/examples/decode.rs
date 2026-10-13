@@ -8,7 +8,7 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let (dbc, errors) = dbc::read_file(args[1].as_ref()).expect("read dbc");
+    let (dbc, errors, _) = dbc::read_file(args[1].as_ref()).expect("read dbc");
     for e in &errors {
         eprintln!("dbc: {e}");
     }

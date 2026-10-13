@@ -79,6 +79,13 @@ impl FrameStore {
     /// clamped so the time column stays sorted for binary search.
     pub fn push_rel(&mut self, ts: f64, key: u32, flags: u8, channel: u8, data: &[u8]) {
         let ts = self.ts.last().map_or(ts, |&last| ts.max(last));
+        self.append(ts, key, flags, channel, data);
+    }
+
+    /// Append keeping the timestamp as is. Bulk loaders use this and call
+    /// [`FrameStore::sort_if_needed`] afterwards, so out-of-order input is
+    /// reordered rather than having its timestamps altered.
+    pub(crate) fn append(&mut self, ts: f64, key: u32, flags: u8, channel: u8, data: &[u8]) {
         let idx = self.ts.len() as u32;
         self.ts.push(ts);
         self.key.push(key);
@@ -141,6 +148,19 @@ impl FrameStore {
         let idx = self.indices(key);
         let n = idx.partition_point(|&i| self.ts[i as usize] <= t);
         n.checked_sub(1).map(|j| self.get(idx[j] as usize))
+    }
+
+    /// Remote request (RTR): has a length but no payload.
+    pub fn is_remote(&self, i: usize) -> bool {
+        self.flags[i] & frame::flags::RTR != 0
+    }
+
+    /// Last frame for `key` at or before `t` that carries data, skipping remote
+    /// requests (bounded look-back, so remote-only ids stay cheap).
+    pub fn last_data_before(&self, key: u32, t: f64) -> Option<FrameRef<'_>> {
+        let idx = self.indices(key);
+        let n = idx.partition_point(|&i| self.ts[i as usize] <= t);
+        idx[..n].iter().rev().take(1024).map(|&i| i as usize).find(|&i| !self.is_remote(i)).map(|i| self.get(i))
     }
 
     /// Copy the frames in `range` into a new store (used to trim logs).

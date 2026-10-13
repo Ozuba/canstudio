@@ -551,7 +551,7 @@ fn unquoted_semicolon(s: &str) -> Option<usize> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'\\' if in_quote => {
+            b'\\' if in_quote && bytes.get(i + 1) == Some(&b'"') => {
                 i += 2;
                 continue;
             }
@@ -578,10 +578,10 @@ fn read_first_quoted(s: &str) -> Option<(String, &str)> {
     let mut out = String::new();
     let mut chars = s[inner_start..].char_indices();
     while let Some((idx, c)) = chars.next() {
-        if c == '\\' {
-            if let Some((_, escaped)) = chars.next() {
-                out.push(escaped);
-            }
+        // Only `\"` is an escape in DBC strings; other backslashes are literal.
+        if c == '\\' && s[inner_start + idx + 1..].starts_with('"') {
+            chars.next();
+            out.push('"');
             continue;
         }
         if c == '"' {

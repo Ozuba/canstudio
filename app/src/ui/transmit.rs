@@ -215,13 +215,9 @@ fn editor(ui: &mut egui::Ui, s: &Session, job: &mut Job) {
     match &mut job.payload {
         Payload::Raw { id, extended, data } => {
             ui.horizontal(|ui| {
-                ui.label("ID 0x");
-                let mut hex = format!("{id:X}");
-                if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(80.0)).changed()
-                    && let Ok(v) = u32::from_str_radix(hex.trim(), 16)
-                {
-                    *id = v;
-                }
+                ui.label("ID");
+                let max = if *extended { 0x1FFF_FFFF } else { 0x7FF };
+                ui.add(egui::DragValue::new(id).range(0..=max).hexadecimal(if *extended { 8 } else { 3 }, false, true).prefix("0x"));
                 ui.checkbox(extended, "Extended");
                 ui.label("Data");
                 ui.add(egui::TextEdit::singleline(data).desired_width(360.0).font(egui::TextStyle::Monospace));

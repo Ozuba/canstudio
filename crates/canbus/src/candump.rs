@@ -166,7 +166,7 @@ pub fn parse_bytes(bytes: &[u8], progress: &AtomicU64) -> Loaded {
                         }
                         let ts = (l.secs - base) as f64 + l.nanos as f64 * 1e-9;
                         let f = &l.frame;
-                        store.push_rel(ts, key(f.id, f.flags), f.flags, last_iface.1, f.data());
+                        store.append(ts, key(f.id, f.flags), f.flags, last_iface.1, f.data());
                     }
                     None if line.trim_ascii().is_empty() => {}
                     None => bad += 1,
@@ -333,6 +333,19 @@ mod tests {
         }
         let out = String::from_utf8(w.into_inner().unwrap()).unwrap();
         assert_eq!(out.lines().collect::<Vec<_>>(), lines);
+    }
+
+    #[test]
+    fn out_of_order_logs_are_sorted_not_clamped() {
+        // e.g. two captures concatenated: timestamps go back in time.
+        let text = "(10.0) can0 001#01\n(12.0) can0 001#02\n(11.0) can1 002#03\n(11.5) can0 001#04\n";
+        let loaded = parse_bytes(text.as_bytes(), &AtomicU64::new(0));
+        let s = &loaded.store;
+        assert_eq!(s.ts, vec![0.0, 1.0, 1.5, 2.0]);
+        let data: Vec<u8> = (0..s.len()).map(|i| s.data(i)[0]).collect();
+        assert_eq!(data, vec![1, 3, 4, 2]);
+        assert_eq!(s.indices(1), &[0, 2, 3]);
+        assert_eq!(s.channels[s.channel[1] as usize], "can1");
     }
 
     #[test]

@@ -212,6 +212,8 @@ impl DbcEditor {
                 s.save_dbc(self.db, false);
             }
         });
+        ui.label(RichText::new(format!("Saved as {}", s.dbs[self.db].encoding.label())).weak().small())
+            .on_hover_text("The file's text encoding is kept when saving. Windows-1252 is the DBC convention (Vector, cantools).");
         let errors = s.dbs[self.db].errors.len();
         if errors > 0 {
             ui.label(RichText::new(format!("{errors} statements skipped while loading")).color(ui.visuals().warn_fg_color))
@@ -568,4 +570,87 @@ fn common_defs() -> Vec<AttributeDef> {
             default: Some(dbc::AttrValue::Float(0.0)),
         },
     ]
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use crate::session::DbFile;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    struct State {
+        editor: DbcEditor,
+        session: Session,
+        order: MessageOrder,
+    }
+
+    fn harness() -> Harness<'static, State> {
+        let src = "BU_: ECU\nBO_ 291 Status: 8 ECU\n SG_ Speed : 0|16@1+ (0.1,0) [0|6553.5] \"km/h\" Vector__XXX\n";
+        let mut session = Session::default();
+        session.dbs.push(DbFile {
+            path: None,
+            dbc: dbc::parse(src).unwrap(),
+            dirty: false,
+            errors: vec![],
+            enabled: true,
+            encoding: Default::default(),
+        });
+        session.recompile();
+        let state = State { editor: DbcEditor::default(), session, order: MessageOrder::Id };
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 1000.0))
+            .build_ui_state(|ui, st: &mut State| st.editor.ui(ui, &mut st.session, &mut st.order), state);
+        h.run();
+        h
+    }
+
+    fn signals(h: &Harness<'_, State>) -> Vec<String> {
+        h.state().session.dbs[0].dbc.messages[0].signals.iter().map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn add_signal_then_undo_and_redo() {
+        let mut h = harness();
+        h.get_by_label_contains("Status").click();
+        h.run();
+        h.get_by_label("➕ Add signal").click();
+        h.run();
+        assert_eq!(signals(&h), ["Speed", "Signal_2"]);
+        assert!(h.state().session.dbs[0].dirty);
+        // The edit is committed and recompiled once the gesture ends.
+        assert!(h.state().session.db.messages[0].signal_index("Signal_2").is_some(), "decoder not updated");
+
+        h.get_by_label("Undo").click();
+        h.run();
+        assert_eq!(signals(&h), ["Speed"]);
+        h.get_by_label("Redo").click();
+        h.run();
+        assert_eq!(signals(&h), ["Speed", "Signal_2"]);
+    }
+
+    #[test]
+    fn rename_and_delete_message_are_undoable() {
+        let mut h = harness();
+        h.get_by_label_contains("Status").click();
+        h.run();
+        // Rename: commit happens on Enter.
+        let name_field = || egui_kittest::kittest::by().role(egui::accesskit::Role::TextInput).value("Status");
+        h.get(name_field()).click();
+        h.run();
+        h.key_combination_modifiers(egui::Modifiers::COMMAND, &[egui::Key::A]);
+        h.get(name_field()).type_text("Engine");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(h.state().session.dbs[0].dbc.messages[0].name, "Engine");
+
+        h.get_by_label("🗑 Delete message").click();
+        h.run();
+        assert!(h.state().session.dbs[0].dbc.messages.is_empty());
+        h.get_by_label("Undo").click();
+        h.run();
+        assert_eq!(h.state().session.dbs[0].dbc.messages[0].name, "Engine");
+        h.get_by_label("Undo").click();
+        h.run();
+        assert_eq!(h.state().session.dbs[0].dbc.messages[0].name, "Status");
+    }
 }

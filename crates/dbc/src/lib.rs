@@ -1,24 +1,28 @@
 //! Self-contained DBC model, parser, writer and signal codec.
 
 pub mod codec;
+pub mod encoding;
 pub mod model;
 pub mod parser;
 pub mod writer;
 
 pub use codec::{CompiledDb, CompiledMessage, CompiledSignal, SignalRef};
+pub use encoding::Encoding;
 pub use model::*;
 pub use parser::{ParseError, parse, parse_lossy};
 pub use writer::write;
 
-/// Read a DBC file, decoding non-UTF-8 (cp1252-ish) bytes lossily.
-pub fn read_file(path: &std::path::Path) -> std::io::Result<(Dbc, Vec<ParseError>)> {
-    let bytes = std::fs::read(path)?;
-    let text = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        // Latin-1 fallback keeps accented characters instead of U+FFFD.
-        Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
-    };
-    Ok(parse_lossy(&text))
+/// Read a DBC file. The detected [`Encoding`] should be passed back to
+/// [`write_file`] so saving does not change the file's encoding.
+pub fn read_file(path: &std::path::Path) -> std::io::Result<(Dbc, Vec<ParseError>, Encoding)> {
+    let (text, encoding) = encoding::decode(&std::fs::read(path)?);
+    let (dbc, errors) = parse_lossy(&text);
+    Ok((dbc, errors, encoding))
+}
+
+/// Write a DBC file in the given encoding.
+pub fn write_file(path: &std::path::Path, dbc: &Dbc, encoding: Encoding) -> std::io::Result<()> {
+    std::fs::write(path, encoding::encode(&write(dbc), encoding))
 }
 
 #[cfg(test)]
@@ -171,6 +175,26 @@ SG_MUL_VAL_ 2147483905 B S 2-2;
         let mut again = parse(&write(&dbc)).unwrap();
         again.new_symbols.clear(); // the writer fills in the default NS_ list
         assert_eq!(again, dbc);
+    }
+
+    #[test]
+    fn backslashes_are_literal_and_quotes_escaped() {
+        let src = "CM_ \"path C:\\tmp [\\] and a \\\"quote\\\"\";\n";
+        let dbc = parse(src).unwrap();
+        assert_eq!(dbc.comment.as_deref(), Some("path C:\\tmp [\\] and a \"quote\""));
+        let out = write(&dbc);
+        assert!(out.contains("CM_ \"path C:\\tmp [\\] and a \\\"quote\\\"\";"), "{out}");
+        assert_eq!(parse(&out).unwrap().comment, dbc.comment);
+    }
+
+    #[test]
+    fn enum_defaults_are_written_by_name() {
+        let src = "BA_DEF_ BO_ \"GenMsgSendType\" ENUM \"Cyclic\",\"NoMsgSendType\";\nBA_DEF_DEF_ \"GenMsgSendType\" \"NoMsgSendType\";\n";
+        let dbc = parse(src).unwrap();
+        assert_eq!(dbc.attribute_defs[0].default, Some(AttrValue::Int(1)));
+        let out = write(&dbc);
+        assert!(out.contains("BA_DEF_DEF_ \"GenMsgSendType\" \"NoMsgSendType\";"), "{out}");
+        assert_eq!(parse(&out).unwrap().attribute_defs, dbc.attribute_defs);
     }
 
     #[test]

@@ -423,13 +423,13 @@ fn mux_editor(ui: &mut egui::Ui, s: &mut Signal, switches: &[String]) -> bool {
 fn decode_preview(ui: &mut egui::Ui, s: &Session, dbc: &Dbc, mi: usize) {
     let m = &dbc.messages[mi];
     let idx = s.store.indices(m.id);
-    let Some(&last) = idx.last() else { return };
-    let data = s.store.data(last as usize);
+    let Some(latest) = s.store.last_data_before(m.id, f64::INFINITY) else { return };
+    let (data, last) = (latest.data, latest.index);
     egui::CollapsingHeader::new(format!("🔬 Decode preview ({} frames in data)", idx.len())).id_salt("decode_preview").show(ui, |ui| {
         let tmp = Dbc { messages: vec![m.clone()], attribute_defs: dbc.attribute_defs.clone(), ..Default::default() };
         let db = dbc::CompiledDb::new([&tmp]);
         let cm = &db.messages[0];
-        ui.label(RichText::new(format!("latest: {}  @ {:.6} s", util::hex_bytes(data), s.store.ts[last as usize])).monospace());
+        ui.label(RichText::new(format!("latest: {}  @ {:.6} s", util::hex_bytes(data), s.store.ts[last])).monospace());
         egui::Grid::new("preview").striped(true).spacing([16.0, 2.0]).show(ui, |ui| {
             for (i, sig) in cm.signals.iter().enumerate() {
                 ui.label(&sig.name);

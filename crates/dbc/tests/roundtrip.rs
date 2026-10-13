@@ -23,7 +23,7 @@ fn roundtrip_corpus() {
     let mut failures = Vec::new();
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let (dbc1, errors) = dbc::read_file(path).unwrap();
+        let (dbc1, errors, _) = dbc::read_file(path).unwrap();
         if let Some(e) = errors.first() {
             failures.push(format!("{name}: parse error: {e}"));
             continue;

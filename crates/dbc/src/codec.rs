@@ -26,7 +26,8 @@ pub struct BitLayout {
 
 impl BitLayout {
     pub fn new(start_bit: u64, size: u64, order: ByteOrder) -> Option<Self> {
-        if size == 0 || size > 64 {
+        // Also bounds the arithmetic below: no start bit beyond a 64-byte frame.
+        if size == 0 || size > 64 || start_bit >= 64 * 8 {
             return None;
         }
         let (lo, hi, shift) = match order {
@@ -239,7 +240,8 @@ impl CompiledMessage {
             index,
             id: m.id,
             name: m.name.clone(),
-            size: m.size as usize,
+            // Clamped: a corrupt DLC must not make `encode` allocate gigabytes.
+            size: (m.size as usize).min(64),
             transmitter: m.transmitter.clone(),
             cycle_time_ms: dbc.cycle_time_ms(m),
             signals,
@@ -254,7 +256,7 @@ impl CompiledMessage {
     pub fn is_active(&self, idx: usize, data: &[u8]) -> bool {
         let mut cur = idx;
         // Bounded walk up the switch chain; guards against cyclic definitions.
-        for _ in 0..8 {
+        for _ in 0..MAX_MUX_DEPTH {
             let Some(cond) = &self.signals[cur].mux else { return true };
             let sw = &self.signals[cond.switch];
             let Some(raw) = sw.layout.and_then(|l| l.extract(data)) else { return false };
@@ -282,17 +284,23 @@ impl CompiledMessage {
     /// Encode physical values (one per signal, in signal order) into a payload.
     /// Signals whose multiplex condition is not met by the switch values are skipped.
     pub fn encode(&self, values: &[f64]) -> Vec<u8> {
-        let mut data = vec![0u8; self.size.max(self.required_len())];
-        // Switches first so multiplexed signals can test their condition.
-        let order = (0..self.signals.len())
-            .filter(|&i| self.signals[i].is_switch || self.signals[i].mux.is_none())
-            .chain((0..self.signals.len()).filter(|&i| !self.signals[i].is_switch && self.signals[i].mux.is_some()));
-        for i in order {
-            let s = &self.signals[i];
-            let (Some(layout), Some(&v)) = (s.layout, values.get(i)) else { continue };
-            if self.is_active(i, &data) {
-                layout.insert(&mut data, s.to_raw(v));
+        let len = self.size.max(self.required_len());
+        // Activity depends on switch values, which may themselves be multiplexed
+        // and listed in any order. Rebuild from scratch, deciding activity from
+        // the previous pass, until the frame is stable (one pass per mux level).
+        let mut data = vec![0u8; len];
+        for _ in 0..=MAX_MUX_DEPTH {
+            let mut next = vec![0u8; len];
+            for (i, s) in self.signals.iter().enumerate() {
+                let (Some(layout), Some(&v)) = (s.layout, values.get(i)) else { continue };
+                if self.is_active(i, &data) {
+                    layout.insert(&mut next, s.to_raw(v));
+                }
             }
+            if next == data {
+                break;
+            }
+            data = next;
         }
         data
     }
@@ -301,6 +309,9 @@ impl CompiledMessage {
         self.signals.iter().filter_map(|s| s.layout).map(|l| l.required_len()).max().unwrap_or(0)
     }
 }
+
+/// Deepest multiplexing chain followed (also stops cyclic definitions).
+const MAX_MUX_DEPTH: usize = 8;
 
 /// Address of a signal inside a [`CompiledDb`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -415,6 +426,67 @@ BO_ 496 ExampleMessage: 8 PCM1
         let mut d = [0u8; 2];
         l.insert(&mut d, 0xBCD);
         assert_eq!(d, [0x0B, 0xCD]);
+    }
+
+    #[test]
+    fn cascaded_mux_encodes_regardless_of_signal_order() {
+        // Signal order as in cantools' issue_184_extended_mux_cascaded.dbc:
+        // the inner switch (m2M) is listed before the outer one (M).
+        let dbc = parse(include_str!("../dbc_tests/issue_184_extended_mux_cascaded.dbc")).unwrap();
+        let db = CompiledDb::new([&dbc]);
+        let m = &db.messages[0];
+        let idx = |n: &str| m.signal_index(n).unwrap();
+        let mut values = vec![0.0; m.signals.len()];
+        values[idx("MUX_A")] = 2.0;
+        values[idx("muxed_A_2_MUX_B")] = 1.0;
+        values[idx("muxed_B_1")] = 5.0;
+        let data = m.encode(&values);
+        assert_eq!(m.decode(idx("MUX_A"), &data), Some(2.0));
+        assert_eq!(m.decode(idx("muxed_A_2_MUX_B"), &data), Some(1.0));
+        assert_eq!(m.decode(idx("muxed_B_1"), &data), Some(5.0));
+        assert_eq!(m.decode(idx("muxed_A_1"), &data), None);
+    }
+
+    #[test]
+    fn random_layouts_round_trip() {
+        // Property: for any valid layout, encode then decode returns the raw value,
+        // and bits outside the signal are left untouched.
+        let mut seed = 0x853C49E6748FEA9Bu64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut checked = 0;
+        while checked < 20_000 {
+            let order = if rng() % 2 == 0 { ByteOrder::LittleEndian } else { ByteOrder::BigEndian };
+            let size = 1 + rng() % 64;
+            let Some(layout) = BitLayout::new(rng() % 512, size, order) else { continue };
+            let mask = if size == 64 { u64::MAX } else { (1 << size) - 1 };
+            let raw = rng() & mask;
+            let mut data = [0u8; 64];
+            let noise: Vec<u8> = (0..64).map(|_| rng() as u8).collect();
+            data.copy_from_slice(&noise);
+            layout.insert(&mut data, raw);
+            assert_eq!(layout.extract(&data), Some(raw), "{order:?} size {size}");
+            // Clearing the signal again must restore every other bit.
+            layout.insert(&mut data, 0);
+            let mut expected = noise.clone();
+            layout.insert(&mut expected, 0);
+            assert_eq!(data.to_vec(), expected);
+            assert_eq!(layout.extract(&data[..layout.required_len() - 1]), None, "short payload must not decode");
+            checked += 1;
+        }
+    }
+
+    #[test]
+    fn absurd_layouts_are_rejected_not_overflowed() {
+        for order in ByteOrder::ALL {
+            assert_eq!(BitLayout::new(u64::MAX, 8, order), None);
+            assert_eq!(BitLayout::new(511, 8, order).is_some(), order == ByteOrder::BigEndian);
+            assert_eq!(BitLayout::new(0, 65, order), None);
+        }
     }
 
     #[test]
