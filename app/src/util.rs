@@ -127,7 +127,12 @@ pub fn swatch(ui: &mut egui::Ui, color: Color32) -> egui::Response {
 /// Text field + clear button used for every filter box.
 pub fn search_box(ui: &mut egui::Ui, text: &mut String, hint: &str) -> egui::Response {
     ui.horizontal(|ui| {
-        let r = ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(ui.available_width() - 24.0));
+        // Always reserve room for the clear button (plus spacing) so the row never
+        // outgrows the panel when it appears; otherwise a resizable side panel
+        // widens and shoves the neighbouring plots to the right.
+        let button_w = ui.spacing().interact_size.x.max(24.0) + ui.spacing().item_spacing.x;
+        let w = (ui.available_width() - button_w).max(20.0);
+        let r = ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(w));
         if !text.is_empty() && ui.small_button("✖").clicked() {
             text.clear();
         }
